@@ -51,7 +51,7 @@ mount $TARGET_PARTITION /mnt
 # 方法1：直接解压 ISO 内容（无需挂载）
 echo "解压 ISO 并部署系统文件..."
 mkdir -p /tmp/iso_extract
-bsdtar -xvf $ISO_DIR/pop-os.iso -C /tmp/iso_extract
+tar -xvf $ISO_DIR/pop-os.iso -C /tmp/iso_extract
 unsquashfs -f -d /mnt /tmp/iso_extract/casper/filesystem.squashfs
 rm -rf /tmp/iso_extract
 
