@@ -19,10 +19,11 @@ fi
 echo "安装必要工具..."
 apt update && apt install -y ntfs-3g squashfs-tools libarchive-tools
 
+ntfsfix  $NTFS_PARTITION
+
 # 挂载 NTFS 分区
 echo "挂载 NTFS 数据分区..."
 umount $NTFS_PARTITION 2>/dev/null || true
-ntfsfix --force $NTFS_PARTITION
 mkdir -p $MOUNT_POINT
 mount -t ntfs-3g -o rw,remove_hiberfile $NTFS_PARTITION $MOUNT_POINT
 mkdir -p $ISO_DIR
