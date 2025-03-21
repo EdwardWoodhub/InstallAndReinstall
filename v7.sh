@@ -85,7 +85,7 @@ mount --bind /sys /mnt/sys
 
 # 安装 GRUB 引导
 chroot /mnt /bin/bash -c " \
-  grub-install --target=i386-pc --recheck --force $TARGET_DISK && \
+  grub-install  --recheck --force $TARGET_DISK && \
   update-grub"
 
 # 生成 fstab
