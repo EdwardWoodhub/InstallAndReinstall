@@ -23,7 +23,7 @@ apt update && apt install -y ntfs-3g || {
 
 # 修复 NTFS 分区写保护
 echo "修复 NTFS 分区错误并解除写保护..."
-ntfsfix --force $NTFS_PARTITION
+ntfsfix  $NTFS_PARTITION
 
 # 挂载 NTFS 分区（强制读写）
 echo "挂载 NTFS 分区..."
