@@ -25,7 +25,8 @@ ntfsfix  "$NTFS_PARTITION"
 echo "挂载 NTFS 分区..."
 umount "$NTFS_PARTITION" 2>/dev/null || true
 ntfsfix  "$NTFS_PARTITION"
-mkdir -p "$MOUNT_POINT" "$ISO_DIR"
+mkdir -p "$MOUNT_POINT" 
+mkdir -p "$ISO_DIR"
 mount -t ntfs-3g -o rw,remove_hiberfile "$NTFS_PARTITION" "$MOUNT_POINT"
 
 # 下载 ISO
