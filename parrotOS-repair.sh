@@ -20,7 +20,7 @@ echo "安装依赖..."
 apt update && apt install -y ntfs-3g squashfs-tools
 
 # 修复 NTFS 分区错误
-ntfsfix --force "$NTFS_PARTITION"
+ntfsfix  "$NTFS_PARTITION"
 
 # ========== NTFS 分区处理 ==========
 echo "处理 NTFS 数据分区..."
@@ -28,7 +28,7 @@ echo "处理 NTFS 数据分区..."
 umount "$NTFS_PARTITION" 2>/dev/null || true
 
 # 修复 NTFS 分区错误
-ntfsfix --force "$NTFS_PARTITION"
+ntfsfix  "$NTFS_PARTITION"
 
 # 创建挂载点目录
 mkdir -p "$MOUNT_POINT"
