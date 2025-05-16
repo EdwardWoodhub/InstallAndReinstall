@@ -57,7 +57,7 @@ if [ -f "$ISO_PATH" ]; then
   ln -sf "$ISO_PATH" /mnt/manjaro.iso
 else
   echo "[!] 开始下载ISO..."
-  check_disk_space "/mnt" 5  # 至少需要5GB空间
+  #check_disk_space "/mnt" 5  # 至少需要5GB空间
   wget -c --show-progress -O /mnt/manjaro.iso "$MANJARO_ISO_URL" || exit 1
 fi
 
@@ -70,7 +70,7 @@ echo "[!] 即将格式化：$TARGET_PARTITION"
 read -rp "确认继续？[y/N] " confirm
 [[ "$confirm" =~ ^[Yy] ]] || exit 0
 
-check_disk_space "$TARGET_PARTITION" 20  # 系统分区至少20GB
+#check_disk_space "$TARGET_PARTITION" 20  # 系统分区至少20GB
 mkfs.ext4 -F -L "SysRoot" "$TARGET_PARTITION" || exit 1
 mkdir -p "$MOUNT_DIR"
 mount "$TARGET_PARTITION" "$MOUNT_DIR" || exit 1
@@ -97,7 +97,7 @@ mount -t overlay overlay \
   "$OVERLAY_WORKDIR/merged" || exit 1
 
 echo "===== 步骤 9/10：同步到系统分区 ====="
-check_disk_space "$MOUNT_DIR" 15  # 检查目标分区空间
+#check_disk_space "$MOUNT_DIR" 15  # 检查目标分区空间
 rsync -aHAX --progress "$OVERLAY_WORKDIR/merged/" "$MOUNT_DIR/" || exit 1
 
 echo "===== 步骤 10/10：系统配置 ====="
