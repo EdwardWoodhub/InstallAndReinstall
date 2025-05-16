@@ -7,8 +7,8 @@ set -e
 TARGET_DISK="/dev/sda"             # 目标磁盘
 TARGET_PARTITION="${TARGET_DISK}1" # 系统分区
 NTFS_PARTITION="${TARGET_DISK}2"   # 数据分区（存放ISO）
-MOUNT_DIR="/root/system"           # 修改后的系统挂载目录
-ISO_PATH="/root/ntfs/iso/manjaro.iso" # 修改后的ISO路径
+MOUNT_DIR="/root/system"           # 系统挂载目录
+ISO_PATH="/root/ntfs/iso/manjaro.iso"
 MANJARO_ISO_URL="https://download.manjaro.org/xfce/25.0.1/manjaro-xfce-25.0.1-250508-linux612.iso"
 
 # ======================
@@ -41,7 +41,7 @@ install_squashfs_tools() {
 }
 
 # ======================
-# 主安装流程
+# 主安装流程（优化磁盘占用）
 # ======================
 echo "===== 步骤1/10：检查权限 ====="
 [ "$(id -u)" != "0" ] && { echo "[-] 需要root权限"; exit 1; }
@@ -75,27 +75,35 @@ mkfs.ext4 -F -L "SysRoot" "$TARGET_PARTITION" || exit 1
 mkdir -p "$MOUNT_DIR"
 mount "$TARGET_PARTITION" "$MOUNT_DIR" || exit 1
 
-echo "===== 步骤6/10：解压合并SFS文件 ====="
+echo "===== 步骤6/10：优化合并SFS文件 ====="
 SFS_LAYERS=(
-  "/root/iso/manjaro/x86_64/rootfs.sfs"    # 基础层（最先解压）
+  "/root/iso/manjaro/x86_64/rootfs.sfs"    # 基础层
   "/root/iso/manjaro/x86_64/desktopfs.sfs" # 桌面层
-  "/root/iso/manjaro/x86_64/mhwdfs.sfs"    # 驱动层（最后解压）
+  "/root/iso/manjaro/x86_64/mhwdfs.sfs"    # 驱动层（最高优先级）
 )
 
-mkdir -p /root/sfs_layers
+# 使用内存盘减少磁盘写入（需要至少2GB空闲内存）
+RAMDISK="/root/sfs_layers"
+mkdir -p "$RAMDISK"
+mount -t tmpfs -o size=2G tmpfs "$RAMDISK" || {
+  echo "[!] 内存盘挂载失败，改用磁盘存储"
+  RAMDISK="/root/sfs_layers"
+  mkdir -p "$RAMDISK"
+}
+
 for idx in "${!SFS_LAYERS[@]}"; do
   sfs_file="${SFS_LAYERS[$idx]}"
-  layer_dir="/root/sfs_layers/layer$idx"
+  layer_dir="$RAMDISK/layer$idx"
   
-  # 解压SFS文件
-  echo "[+] 解压层 $((idx+1)): $(basename "$sfs_file")"
-  unsquashfs -f -d "$layer_dir" "$sfs_file" || exit 1
+  # 直接挂载SFS避免解压（减少磁盘占用）
+  echo "[+] 挂载层 $((idx+1)): $(basename "$sfs_file")"
+  mkdir -p "$layer_dir"
+  mount -t squashfs -o loop,ro "$sfs_file" "$layer_dir" || exit 1
 
-  # 合并文件（后解压的层覆盖先前的）
-  echo "  |- 正在合并文件到系统分区..."
-  cp -a --backup=numbered "$layer_dir"/* "$MOUNT_DIR/" 2>&1 | \
-    awk '{print "    |  "$0}'
-  echo "  |- 已合并文件数：$(find "$layer_dir" | wc -l)"
+  # 使用rsync增量同步（避免重复写入）
+  echo "  |- 增量同步文件..."
+  rsync -aHAX --delete --progress "$layer_dir/" "$MOUNT_DIR/" 2>&1 | \
+    awk '/^sent/ {print "    |  传输量：" $2 "  速度：" $7}'
 done
 
 echo "===== 步骤7/10：生成fstab ====="
@@ -111,7 +119,8 @@ chroot "$MOUNT_DIR" grub-install --target=i386-pc --recheck "$TARGET_DISK" || ex
 chroot "$MOUNT_DIR" grub-mkconfig -o /boot/grub/grub.cfg || exit 1
 
 echo "===== 步骤9/10：清理临时文件 ====="
-rm -rf /root/sfs_layers/*
+umount -R "$RAMDISK"/* 2>/dev/null || true
+umount -l "$RAMDISK" 2>/dev/null || true
 
 echo "===== 步骤10/10：安装完成 ====="
 echo -e "\n\e[32m[√] 系统安装成功！耗时: ${SECONDS}秒\e[0m"
