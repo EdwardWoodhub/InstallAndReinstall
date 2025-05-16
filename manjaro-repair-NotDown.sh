@@ -28,12 +28,12 @@ mount -t ntfs-3g -o rw,remove_hiberfile "$NTFS_PARTITION" "$NTFS_MOUNT_POINT"
 echo "下载 Manjaro ISO..."
 mkdir -p "$ISO_DIR"
 ISO_FILE="$ISO_DIR/manjaro.iso"
-if [ -f "$ISO_File" ]; then
-  echo "检测到已存在 ISO 文件: $ISO_File"
+if [ -f "$ISO_FILE" ]; then
+  echo "检测到已存在 ISO 文件: $ISO_FILE"
   echo "跳过下载步骤..."
 else
   echo "开始下载 Manjaro ISO..."
-  wget --show-progress -O "$ISO_File" "$MANJARO_ISO_URL"
+  wget --show-progress -O "$ISO_FILE" "$MANJARO_ISO_URL"
 fi
 
 # ========== 挂载 ISO ==========
