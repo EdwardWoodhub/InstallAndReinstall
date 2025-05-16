@@ -47,6 +47,7 @@ echo "合并系统层级..."
 SQUASHFS_DIR="$ISO_MOUNT_DIR/manjaro/x86_64"
 UNION_DIR="/tmp/unionfs"
 mkdir -p "$UNION_DIR"/{upper,work}
+chmod 755 "$UNION_DIR"/{upper,work}
 
 mount -t overlay overlay -o \
 lowerdir="$SQUASHFS_DIR/rootfs.sfs:$SQUASHFS_DIR/desktopfs.sfs:$SQUASHFS_DIR/mhwdfs.sfs",\
