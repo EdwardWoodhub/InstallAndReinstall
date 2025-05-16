@@ -2,139 +2,181 @@
 set -e
 
 # ======================
-# 配置参数
+# 配置参数（安装前必填）
 # ======================
-TARGET_DISK="/dev/sda"
-TARGET_PARTITION="${TARGET_DISK}1"
-NTFS_PARTITION="${TARGET_DISK}2"
-MOUNT_DIR="/root/system"
-ISO_PATH="/root/ntfs/iso/manjaro.iso"  # 修改后的ISO路径
+TARGET_DISK="/dev/sda"             # 要安装系统的磁盘
+TARGET_PARTITION="${TARGET_DISK}1" # 系统分区
+NTFS_PARTITION="${TARGET_DISK}2"   # 数据分区（存放ISO）
+MOUNT_DIR="/root/system"           # 系统挂载目录
+ISO_PATH="/root/ntfs/iso/manjaro.iso" # ISO存放路径
 MANJARO_ISO_URL="https://download.manjaro.org/xfce/25.0.1/manjaro-xfce-25.0.1-250508-linux612.iso"
-SFS_FILES=(
-  "mhwdfs.sfs"
-  "desktopfs.sfs"
-  "rootfs.sfs"
-)
-GRUB_TARGET="i386-pc"
 
 # ======================
-# NTFS ISO检测
+# 初始化清理
 # ======================
-check_iso() {
-  mkdir -p /root/ntfs
-  ntfsfix "$NTFS_PARTITION"
-  mount -t ntfs-3g -o ro "$NTFS_PARTITION" /root/ntfs
-  
-  if [ -f "$ISO_PATH" ]; then
-    echo "发现ISO缓存: $ISO_PATH"
-    return 0
-  else
-    echo "未找到ISO文件，需要下载..."
-    return 1
+echo "===== 步骤 1/10：准备环境 ====="
+rm -rf /tmp/sfs_layers
+mkdir -p /tmp/sfs_layers/{root,desktop,mhwdf}
+cleanup() {
+  echo "===== 清理挂载点 ====="
+  umount -l /mnt/iso 2>/dev/null || echo "[-] 卸载/mnt/iso失败"
+  umount -R /tmp/sfs_layers 2>/dev/null || echo "[-] 卸载SFS层失败"
+  umount -R "$MOUNT_DIR" 2>/dev/null || echo "[-] 卸载系统目录失败"
+  umount -l /root/ntfs 2>/dev/null || echo "[-] 卸载NTFS分区失败"
+}
+trap cleanup EXIT
+
+# ======================
+# 权限检查
+# ======================
+echo "===== 步骤 2/10：检查权限 ====="
+if [ "$(id -u)" != "0" ]; then
+  echo "[-] 错误：必须使用root权限运行！"
+  exit 1
+fi
+
+# ======================
+# 内核模块检查
+# ======================
+echo "===== 步骤 3/10：检查SquashFS支持 ====="
+if ! grep -q squashfs /proc/filesystems; then
+  echo "[!] 加载squashfs内核模块..."
+  if ! modprobe squashfs; then
+    echo "[-] 无法加载squashfs模块，请检查内核配置"
+    exit 1
   fi
+fi
+
+# ======================
+# 挂载NTFS分区检查ISO
+# ======================
+echo "===== 步骤 4/10：检查ISO缓存 ====="
+mkdir -p /root/ntfs
+ntfsfix "$NTFS_PARTITION" || {
+  echo "[-] NTFS分区修复失败：$NTFS_PARTITION"
+  exit 1
+}
+mount -t ntfs-3g -o ro "$NTFS_PARTITION" /root/ntfs || {
+  echo "[-] NTFS分区挂载失败"
+  exit 1
+}
+
+if [ -f "$ISO_PATH" ]; then
+  echo "[+] 找到ISO缓存：$ISO_PATH"
+  cp -v "$ISO_PATH" /tmp/manjaro.iso
+else
+  echo "[!] 未找到ISO，开始下载..."
+  wget --show-progress -O /tmp/manjaro.iso "$MANJARO_ISO_URL" || {
+    echo "[-] ISO下载失败"
+    exit 1
+  }
+  echo "[+] 下载完成，备份ISO到NTFS分区..."
+  mkdir -p /root/ntfs/iso
+  cp -v /tmp/manjaro.iso "$ISO_PATH"
+fi
+
+# ======================
+# 挂载ISO
+# ======================
+echo "===== 步骤 5/10：挂载ISO ====="
+mkdir -p /mnt/iso
+mount -o loop /tmp/manjaro.iso /mnt/iso || {
+  echo "[-] ISO挂载失败"
+  exit 1
 }
 
 # ======================
-# 分区处理
+# 准备系统分区
 # ======================
-prepare_partitions() {
-  echo "格式化系统分区..."
-  mkfs.ext4 -F -L "SysRoot" "$TARGET_PARTITION"
+echo "===== 步骤 6/10：准备系统分区 ====="
+echo "[!] 即将格式化分区：$TARGET_PARTITION"
+read -rp "确认继续？[y/N] " confirm
+if [[ ! "$confirm" =~ ^[Yy] ]]; then
+  echo "[-] 用户取消操作"
+  exit 0
+fi
 
-  mkdir -p "$MOUNT_DIR"
-  mount "$TARGET_PARTITION" "$MOUNT_DIR"
+mkfs.ext4 -F -L "SysRoot" "$TARGET_PARTITION" || {
+  echo "[-] 分区格式化失败"
+  exit 1
+}
+
+mkdir -p "$MOUNT_DIR"
+mount "$TARGET_PARTITION" "$MOUNT_DIR" || {
+  echo "[-] 分区挂载失败"
+  exit 1
 }
 
 # ======================
-# 文件系统合并
+# 合并系统层（修改后的关键步骤）
 # ======================
-merge_sfs_layers() {
-  local WORK_DIR="/tmp/sfs_merge"
-  mkdir -p "$WORK_DIR"/{layers,upper,work}
+echo "===== 步骤 7/10：合并系统层 ====="
 
-  # 挂载ISO获取sfs文件
-  mkdir -p /mnt/iso
-  mount -o loop /tmp/manjaro.iso /mnt/iso
+# 定义要处理的SFS文件列表（按优先级从低到高）
+declare -A SFS_LAYERS=(
+  ["base"]="/mnt/iso/manjaro/x86_64/rootfs.sfs"
+  ["desktop"]="/mnt/iso/manjaro/x86_64/desktopfs.sfs" 
+  ["drivers"]="/mnt/iso/manjaro/x86_64/mhwdfs.sfs"
+)
 
-  # 挂载所有SFS层
-  for ((i=0; i<${#SFS_FILES[@]}; i++)); do
-    sfs_file="/mnt/iso/$(find /mnt/iso -name ${SFS_FILES[i]} -print -quit)"
-    layer_dir="$WORK_DIR/layers/layer$i"
-    
-    mkdir -p "$layer_dir"
-    mount -t squashfs -o loop,ro "$sfs_file" "$layer_dir"
-  done
-
-  # 生成lowerdir参数（优先级从高到低）
-  lower_dirs=$(find "$WORK_DIR/layers" -mindepth 1 -maxdepth 1 -type d | sort -r | tr '\n' ':')
-  lower_dirs="${lower_dirs%:}"
-
-  # 创建OverlayFS合并视图
-  mount -t overlay overlay \
-    -o lowerdir="$lower_dirs",upperdir="$WORK_DIR/upper",workdir="$WORK_DIR/work" \
-    "$MOUNT_DIR"
-
-  # 固化文件系统
-  rsync -aHAX --delete "$MOUNT_DIR/" "$MOUNT_DIR/"
-}
+# 分步处理每个层
+for layer in base desktop drivers; do
+  echo "[+] 处理 $layer 层..."
+  sfs_path="${SFS_LAYERS[$layer]}"
+  mount_point="/tmp/sfs_layers/$layer"
+  
+  # 创建挂载点
+  mkdir -p "$mount_point"
+  
+  # 挂载SFS文件
+  if ! mount -t squashfs -o loop,ro "$sfs_path" "$mount_point"; then
+    echo "[-] 无法挂载：$sfs_path"
+    exit 1
+  fi
+  
+  # 复制文件（保留属性）
+  echo "  |- 复制文件到系统分区..."
+  cp -a --backup=numbered "$mount_point"/* "$MOUNT_DIR/" 2>&1 | \
+    awk '{print "  |  "$0}'
+  
+  # 记录覆盖情况
+  echo "  |- 已处理文件数：$(find "$mount_point" | wc -l)"
+done
 
 # ======================
 # 系统配置
 # ======================
-configure_system() {
-  # 基础挂载
-  mount --bind /dev  "$MOUNT_DIR/dev"
-  mount --bind /proc "$MOUNT_DIR/proc"
-  mount --bind /sys  "$MOUNT_DIR/sys"
-  mount --bind /run  "$MOUNT_DIR/run"
+echo "===== 步骤 8/10：系统基础配置 ====="
+echo "[+] 挂载虚拟文件系统..."
+mount --bind /dev  "$MOUNT_DIR/dev"
+mount --bind /proc "$MOUNT_DIR/proc"
+mount --bind /sys  "$MOUNT_DIR/sys"
+mount --bind /run  "$MOUNT_DIR/run"
 
-  # 生成fstab
-  local root_uuid=$(blkid -s UUID -o value "$TARGET_PARTITION")
-  echo "UUID=$root_uuid / ext4 defaults 0 1" > "$MOUNT_DIR/etc/fstab"
-
-  # 安装引导
-  chroot "$MOUNT_DIR" grub-install \
-    --target="$GRUB_TARGET" \
-    --recheck \
-    "$TARGET_DISK"
-  
-  chroot "$MOUNT_DIR" grub-mkconfig \
-    -o "/boot/grub/grub.cfg"
-}
+echo "[+] 生成fstab..."
+root_uuid=$(blkid -s UUID -o value "$TARGET_PARTITION")
+echo "UUID=$root_uuid / ext4 defaults 0 1" > "$MOUNT_DIR/etc/fstab"
 
 # ======================
-# 主流程
+# 安装引导
 # ======================
-cleanup() {
-  umount -R /mnt/iso 2>/dev/null || true
-  umount -R /root/ntfs 2>/dev/null || true
-  umount -R "$MOUNT_DIR" 2>/dev/null || true
-  rm -rf /tmp/sfs_merge /tmp/manjaro.iso
-}
+echo "===== 步骤 9/10：安装引导程序 ====="
+if ! chroot "$MOUNT_DIR" grub-install --target=i386-pc --recheck "$TARGET_DISK"; then
+  echo "[-] GRUB安装失败"
+  exit 1
+fi
 
-check_prerequisites() {
-  [ "$(id -u)" != "0" ] && { echo "需要root权限"; exit 1; }
-  modprobe overlay || { echo "需要overlay支持"; exit 1; }
-}
+if ! chroot "$MOUNT_DIR" grub-mkconfig -o /boot/grub/grub.cfg; then
+  echo "[-] GRUB配置生成失败"
+  exit 1
+fi
 
-main() {
-  trap cleanup EXIT
-  check_prerequisites
-  
-  # 处理ISO
-  if check_iso; then
-    cp "$ISO_PATH" /tmp/manjaro.iso
-  else
-    wget --show-progress -O /tmp/manjaro.iso "$MANJARO_ISO_URL"
-  fi
-
-  prepare_partitions
-  merge_sfs_layers
-  configure_system
-
-  echo -e "\n\e[32m安装成功！耗时: ${SECONDS}s\e[0m"
-  read -rp "按回车重启..." -n1
-  reboot
-}
-
-main "$@"
+# ======================
+# 完成提示
+# ======================
+echo "===== 步骤 10/10：安装完成 ====="
+echo -e "\n\e[32m[√] 系统安装成功！耗时: ${SECONDS}秒\e[0m"
+echo -e "请手动执行以下操作："
+echo "1. 卸载分区：umount -R $MOUNT_DIR"
+echo "2. 重启系统：reboot"
+echo -e "\n警告：重启前请保存所有工作！"
