@@ -8,7 +8,7 @@ TARGET_DISK="/dev/sda"             # 目标磁盘
 TARGET_PARTITION="${TARGET_DISK}1" # 系统分区
 NTFS_PARTITION="${TARGET_DISK}2"   # 数据分区（存放ISO）
 MOUNT_DIR="/root/system"           # 系统挂载目录
-ISO_PATH="/root/ntfs/iso/manjaro.iso"
+ISO_PATH="/root/ntfs/iso/manjaro.iso" # ISO存放路径
 MANJARO_ISO_URL="https://download.manjaro.org/xfce/25.0.1/manjaro-xfce-25.0.1-250508-linux612.iso"
 
 # ======================
@@ -19,7 +19,7 @@ cleanup() {
   umount -l /root/iso 2>/dev/null || true
   umount -l /root/ntfs 2>/dev/null || true
   umount -R "$MOUNT_DIR" 2>/dev/null || true
-  rm -rf /root/sfs_layers /root/manjaro.iso
+  rm -rf /root/sfs_layers
 }
 trap cleanup EXIT
 
@@ -48,23 +48,34 @@ echo "===== 步骤1/10：检查权限 ====="
 
 install_squashfs_tools
 
-echo "===== 步骤2/10：挂载NTFS分区 ====="
+echo "===== 步骤2/10：智能挂载NTFS分区 ====="
 mkdir -p /root/ntfs
-ntfsfix "$NTFS_PARTITION" || exit 1
-mount -t ntfs-3g -o ro "$NTFS_PARTITION" /root/ntfs || exit 1
+if [ -f "$ISO_PATH" ]; then
+  echo "[+] 以只读模式挂载NTFS分区"
+  ntfsfix "$NTFS_PARTITION" || exit 1
+  mount -t ntfs-3g -o ro "$NTFS_PARTITION" /root/ntfs || exit 1
+else
+  echo "[!] 以读写模式挂载NTFS分区（用于下载ISO）"
+  ntfsfix "$NTFS_PARTITION" || exit 1
+  mount -t ntfs-3g -o rw "$NTFS_PARTITION" /root/ntfs || exit 1
+fi
 
 echo "===== 步骤3/10：处理ISO文件 ====="
 if [ -f "$ISO_PATH" ]; then
   echo "[+] 使用现有ISO：$ISO_PATH"
-  cp -v "$ISO_PATH" /root/manjaro.iso
 else
   echo "[!] 开始下载ISO..."
-  wget -c --show-progress -O /root/manjaro.iso "$MANJARO_ISO_URL" || exit 1
+  mkdir -p "$(dirname "$ISO_PATH")"
+  wget -c --show-progress -O "$ISO_PATH.part" "$MANJARO_ISO_URL" || exit 1
+  mv "$ISO_PATH.part" "$ISO_PATH"  # 原子操作确保文件完整性
 fi
 
 echo "===== 步骤4/10：挂载ISO ====="
 mkdir -p /root/iso
-mount -o loop /root/manjaro.iso /root/iso || exit 1
+mount -o loop "$ISO_PATH" /root/iso || {
+  echo "[-] ISO挂载失败，请检查文件完整性"
+  exit 1
+}
 
 echo "===== 步骤5/10：准备系统分区 ====="
 echo "[!] 即将格式化：$TARGET_PARTITION"
