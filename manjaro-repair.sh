@@ -15,12 +15,12 @@ MANJARO_ISO_URL="https://download.manjaro.org/xfce/25.0.1/manjaro-xfce-25.0.1-25
 # 初始化清理
 # ======================
 echo "===== 步骤 1/10：准备环境 ====="
-rm -rf /tmp/sfs_layers
-mkdir -p /tmp/sfs_layers/{root,desktop,mhwdf}
+rm -rf /mnt/sfs_layers
+mkdir -p /mnt/sfs_layers/{root,desktop,mhwdf}
 cleanup() {
   echo "===== 清理挂载点 ====="
   umount -l /mnt/iso 2>/dev/null || echo "[-] 卸载/mnt/iso失败"
-  umount -R /tmp/sfs_layers 2>/dev/null || echo "[-] 卸载SFS层失败"
+  umount -R /mnt/sfs_layers 2>/dev/null || echo "[-] 卸载SFS层失败"
   umount -R "$MOUNT_DIR" 2>/dev/null || echo "[-] 卸载系统目录失败"
   umount -l /root/ntfs 2>/dev/null || echo "[-] 卸载NTFS分区失败"
 }
@@ -63,16 +63,16 @@ mount -t ntfs-3g -o ro "$NTFS_PARTITION" /root/ntfs || {
 
 if [ -f "$ISO_PATH" ]; then
   echo "[+] 找到ISO缓存：$ISO_PATH"
-  cp -v "$ISO_PATH" /tmp/manjaro.iso
+  cp -v "$ISO_PATH" /mnt/manjaro.iso
 else
   echo "[!] 未找到ISO，开始下载..."
-  wget --show-progress -O /tmp/manjaro.iso "$MANJARO_ISO_URL" || {
+  wget --show-progress -O /mnt/manjaro.iso "$MANJARO_ISO_URL" || {
     echo "[-] ISO下载失败"
     exit 1
   }
   echo "[+] 下载完成，备份ISO到NTFS分区..."
   mkdir -p /root/ntfs/iso
-  cp -v /tmp/manjaro.iso "$ISO_PATH"
+  cp -v /mnt/manjaro.iso "$ISO_PATH"
 fi
 
 # ======================
@@ -80,7 +80,7 @@ fi
 # ======================
 echo "===== 步骤 5/10：挂载ISO ====="
 mkdir -p /mnt/iso
-mount -o loop /tmp/manjaro.iso /mnt/iso || {
+mount -o loop /mnt/manjaro.iso /mnt/iso || {
   echo "[-] ISO挂载失败"
   exit 1
 }
@@ -108,7 +108,7 @@ mount "$TARGET_PARTITION" "$MOUNT_DIR" || {
 }
 
 # ======================
-# 合并系统层（修改后的关键步骤）
+# 合并系统层
 # ======================
 echo "===== 步骤 7/10：合并系统层 ====="
 
@@ -123,7 +123,7 @@ declare -A SFS_LAYERS=(
 for layer in base desktop drivers; do
   echo "[+] 处理 $layer 层..."
   sfs_path="${SFS_LAYERS[$layer]}"
-  mount_point="/tmp/sfs_layers/$layer"
+  mount_point="/mnt/sfs_layers/$layer"
   
   # 创建挂载点
   mkdir -p "$mount_point"
