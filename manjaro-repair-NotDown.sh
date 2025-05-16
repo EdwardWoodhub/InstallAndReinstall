@@ -45,7 +45,7 @@ mount -o loop "$ISO_FILE" "$ISO_MOUNT_DIR"
 # ========== 合并文件系统 ==========
 echo "合并系统层级..."
 SQUASHFS_DIR="$ISO_MOUNT_DIR/manjaro/x86_64"
-UNION_DIR="/tmp/unionfs"
+UNION_DIR="/mnt/unionfs"
 mkdir -p "$UNION_DIR"/{upper,work}
 chmod 755 "$UNION_DIR"/{upper,work}
 
