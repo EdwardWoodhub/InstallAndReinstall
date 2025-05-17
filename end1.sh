@@ -26,6 +26,8 @@ prepare_environment() {
     modprobe loop || true
     modprobe squashfs || true
     modprobe fuse || true
+    # 安装必要依赖
+    pacman -Sy --noconfirm zstd curl || true
 }
 
 install_squashfs_tools() {
@@ -41,12 +43,13 @@ install_squashfs_tools() {
     fi
 
     echo "解压软件包..."
-    tar -xf "$TMP_DIR/pkg.tar.zst" -C $TMP_DIR
+    tar -I zstd -xf "$TMP_DIR/pkg.tar.zst" -C $TMP_DIR
 
     echo "部署二进制文件..."
-    cp $TMP_DIR/usr/bin/*squashfs /usr/local/bin/
-    cp -r $TMP_DIR/usr/lib/ /usr/local/
-    ldconfig
+    # 修正路径处理
+    [ -d "$TMP_DIR/usr/bin" ] && cp -v $TMP_DIR/usr/bin/*squashfs /usr/local/bin/
+    [ -d "$TMP_DIR/usr/lib" ] && cp -vr $TMP_DIR/usr/lib/* /usr/local/lib/
+    ldconfig 2>/dev/null || true
 
     if ! unsquashfs -version; then
         echo "错误：squashfs-tools安装失败！"
@@ -140,6 +143,7 @@ extract_system() {
 configure_system() {
     echo "=== 系统配置 ==="
     echo "生成fstab..."
+    mkdir -p "$MOUNT_DIR/etc"
     genfstab -U "$MOUNT_DIR" > "$MOUNT_DIR/etc/fstab"
 
     echo "准备chroot环境..."
