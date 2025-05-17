@@ -83,10 +83,10 @@ mount_ntfs() {
 
   # 分区修复
   echo "[NTFS] 检查文件系统"
-  if ! ntfsfix --force "${NTFS_PARTITION}"; then
+  if ! ntfsfix  "${NTFS_PARTITION}"; then
     echo "[!] 自动修复失败，尝试卸载后修复"
     umount -l "${NTFS_PARTITION}" 2>/dev/null || true
-    if ! ntfsfix --force "${NTFS_PARTITION}"; then
+    if ! ntfsfix  "${NTFS_PARTITION}"; then
       echo "[-] 无法修复NTFS分区"
       exit 1
     fi
