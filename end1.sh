@@ -29,8 +29,6 @@ prepare_environment() {
     echo "安装必要工具..."
     pacman -Sy --noconfirm curl gzip xz tar gcc make 2>/dev/null || {
         echo "尝试最小化安装..."
-        curl -O https://geo.mirror.pkgbuild.com/core/os/x86_64/curl-8.7.1-1-x86_64.pkg.tar.zst
-        pacman -U --noconfirm *.pkg.tar.zst
     }
 }
 
