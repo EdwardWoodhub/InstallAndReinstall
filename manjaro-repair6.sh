@@ -47,8 +47,8 @@ trap cleanup EXIT
 install_deps() {
   echo "===== 安装系统依赖 ====="
   # 强制移除并锁定fuse3
-  apt-get remove --purge fuse3 -y 2>/dev/null || true
-  apt-mark hold fuse3 2>/dev/null || true
+  #apt-get remove --purge fuse3 -y 2>/dev/null || true
+  #apt-mark hold fuse3 2>/dev/null || true
 
   # Debian系统配置
   if grep -qi "debian" /etc/os-release; then
