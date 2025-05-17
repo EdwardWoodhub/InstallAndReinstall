@@ -95,8 +95,11 @@ SFS_LAYERS=(
   "/root/iso/manjaro/x86_64/mhwdfs.sfs"    # 驱动层（最高优先级）
 )
 
-# 创建OverlayFS结构并挂载
+# 创建OverlayFS结构并挂载（修复权限问题）
 mkdir -p "$OVERLAY_BASE"/{lower,upper,work,merged}
+# 关键修复1：确保upper和work目录权限
+chmod 0755 "$OVERLAY_BASE"/upper "$OVERLAY_BASE"/work
+
 for idx in "${!SFS_LAYERS[@]}"; do
   layer_sfs="${SFS_LAYERS[$idx]}"
   layer_dir="$OVERLAY_BASE/lower/layer$idx"
@@ -105,16 +108,25 @@ for idx in "${!SFS_LAYERS[@]}"; do
   mount -t squashfs -o loop,ro "$layer_sfs" "$layer_dir" || exit 1
 done
 
-# 调整OverlayFS参数避免只读错误
-lower_dirs=$(find "$OVERLAY_BASE/lower" -mindepth 1 -maxdepth 1 -type d | sort | tr '\n' ':')
+# 关键修复2：调整lowerdir顺序并使用更稳定的合并参数
+lower_dirs=$(find "$OVERLAY_BASE/lower" -mindepth 1 -maxdepth 1 -type d | sort -r | tr '\n' ':')
 lower_dirs="${lower_dirs%:}"
 echo "===== 步骤7/10：创建联合视图（修复只读问题）===="
 mount -t overlay overlay \
-  -o lowerdir="$lower_dirs",upperdir="$OVERLAY_BASE/upper",workdir="$OVERLAY_BASE/work",noxattr,metacopy=off \
+  -o lowerdir="$lower_dirs",upperdir="$OVERLAY_BASE/upper",workdir="$OVERLAY_BASE/work" \
   "$OVERLAY_BASE/merged" || exit 1
 
+# 关键修复3：测试OverlayFS写入能力
+echo "[测试] 验证OverlayFS写入功能"
+touch "$OVERLAY_BASE/merged/.write_test" || {
+  echo "[-] OverlayFS写入测试失败，请检查配置"
+  exit 1
+}
+rm -f "$OVERLAY_BASE/merged/.write_test"
+
 echo "===== 步骤8/10：安全同步到系统分区 ====="
-rsync -aHAX --ignore-errors --progress \
+# 关键修复4：调整rsync参数避免权限问题
+rsync -aHAX --copy-links --ignore-errors --progress \
   --exclude='/usr/share/icons/Papirus/64x64/apps/appimagekit-*' \
   "$OVERLAY_BASE/merged/" "$MOUNT_DIR/" || {
   echo "[!] 部分文件同步失败（已跳过只读文件）"
@@ -122,7 +134,8 @@ rsync -aHAX --ignore-errors --progress \
 
 # 手动处理已知冲突文件
 echo "===== 步骤9/10：清理冲突文件 ====="
-find "$MOUNT_DIR" -name '*.svg' -type f -delete 2>/dev/null || true
+# 关键修复5：使用chattr处理只读文件
+find "$MOUNT_DIR" -name '*.svg' -type f -exec chattr -i {} \; -delete 2>/dev/null || true
 
 echo "===== 步骤10/10：系统配置 ====="
 echo "[+] 生成fstab..."
