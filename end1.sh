@@ -9,7 +9,7 @@ MOUNT_DIR="/root/system"             # 系统挂载点
 NTFS_MOUNT="/root/ntfs"              # NTFS挂载点
 ISO_NAME="endeavouros.iso"           # ISO文件名
 ISO_PATH="$NTFS_MOUNT/iso/$ISO_NAME" # ISO完整路径
-ISO_URL="https://mirrors.bfsu.edu.cn/endeavouros/iso/EndeavourOS_Mercury-Neo-2025.03.19.iso" # 国内镜像源
+ISO_URL="https://mirrors.bfsu.edu.cn/endeavouros/iso/EndeavourOS_Mercury-Neo-2025.03.19.iso"
 # ================================================
 
 cleanup() {
@@ -29,6 +29,8 @@ prepare_environment() {
     echo "安装必要工具..."
     pacman -Sy --noconfirm curl gzip xz tar gcc make 2>/dev/null || {
         echo "尝试最小化安装..."
+        curl -O https://geo.mirror.pkgbuild.com/core/os/x86_64/curl-8.7.1-1-x86_64.pkg.tar.zst
+        pacman -U --noconfirm *.pkg.tar.zst
     }
 }
 
@@ -68,8 +70,40 @@ build_squashfs_from_source() {
     local SRC_DIR="/tmp/squashfs-src"
     mkdir -p $SRC_DIR
 
-    echo "下载源码包..."
-    curl -L https://ghproxy.com/https://github.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz | tar xz -C $SRC_DIR
+    echo "尝试从多个镜像下载源码..."
+    local MIRRORS=(
+        "https://github.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz"
+        "https://ghproxy.com/https://github.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz"
+        "https://hub.yzuu.cf/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz"
+        "https://kgithub.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz"
+    )
+
+    for mirror in "${MIRRORS[@]}"; do
+        echo "正在尝试镜像源：$mirror"
+        if curl -L -o $SRC_DIR/squashfs.tar.gz "$mirror" \
+            --connect-timeout 20 \
+            --retry 3 \
+            --retry-delay 5; then
+            if tar -tzf $SRC_DIR/squashfs.tar.gz >/dev/null 2>&1; then
+                echo "下载验证成功"
+                break
+            else
+                echo "文件损坏，尝试下一个镜像"
+                rm -f $SRC_DIR/squashfs.tar.gz
+            fi
+        else
+            echo "下载失败，尝试下一个镜像"
+            continue
+        fi
+    done
+
+    if [ ! -f $SRC_DIR/squashfs.tar.gz ]; then
+        echo "错误：所有镜像源均不可用！"
+        exit 1
+    fi
+
+    echo "解压源码..."
+    tar -xzf $SRC_DIR/squashfs.tar.gz -C $SRC_DIR
 
     echo "编译静态版本..."
     cd $SRC_DIR/squashfs-tools-4.6.1/squashfs-tools
