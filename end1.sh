@@ -87,7 +87,7 @@ mount_filesystems() {
     echo "=== 挂载文件系统 ==="
     [ -b "$NTFS_PARTITION" ] || { echo "错误：NTFS分区不存在"; exit 1; }
     [ -b "$EXT4_PARTITION" ] || { echo "错误：EXT4分区不存在"; exit 1; }
-
+    mkdir -p $NTFS_MOUNT
     echo "处理NTFS分区..."
     if ! mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT" 2>/dev/null; then
         echo "检测到NTFS错误，尝试修复..."
