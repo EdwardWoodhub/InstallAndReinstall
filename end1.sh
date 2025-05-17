@@ -25,7 +25,7 @@ prepare_environment() {
     modprobe loop || true
     modprobe squashfs || true
     modprobe fuse || true
-    pacman -Sy --noconfirm curl 2>/dev/null || true
+    pacman -Sy --noconfirm curl gzip xz 2>/dev/null || true
 }
 
 install_static_unsquashfs() {
@@ -33,22 +33,38 @@ install_static_unsquashfs() {
     local TMP_DIR="/tmp/squashfs-static"
     mkdir -p $TMP_DIR
 
-    echo "下载静态二进制文件..."
-    if ! curl -L -o $TMP_DIR/unsquashfs.static \
-        https://github.com/plougher/squashfs-tools/releases/download/4.6.1/squashfs4.6.1.tar.gz; then
-        echo "错误：无法下载静态二进制文件"
-        exit 1
+    echo "尝试从GitHub下载静态二进制..."
+    if ! curl -L -o $TMP_DIR/unsquashfs-static.xz \
+        "https://github.com/plougher/squashfs-tools/releases/download/4.6.1/squashfs4.6.1.tar.gz"; then
+        echo "GitHub下载失败，尝试备用源..."
+        curl -L -o $TMP_DIR/unsquashfs-static.xz \
+            "https://static.whonix.org/linux/squashfs-tools/unsquashfs.xz"
     fi
 
     echo "解压并部署..."
-    tar -xzf $TMP_DIR/unsquashfs.static -C $TMP_DIR
-    find $TMP_DIR -name 'unsquashfs' -exec cp -v {} /usr/local/bin/ \;
+    xz -d $TMP_DIR/unsquashfs-static.xz
+    mv $TMP_DIR/unsquashfs-static /usr/local/bin/unsquashfs
     chmod +x /usr/local/bin/unsquashfs
 
     if ! unsquashfs -version; then
-        echo "错误：unsquashfs安装失败！"
-        exit 1
+        echo "静态二进制不可用，尝试源码编译..."
+        build_squashfs_from_source
     fi
+}
+
+build_squashfs_from_source() {
+    echo "=== 从源码编译squashfs-tools ==="
+    local SRC_DIR="/tmp/squashfs-src"
+    mkdir -p $SRC_DIR
+
+    echo "下载源码包..."
+    curl -L https://github.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz | tar xz -C $SRC_DIR
+
+    echo "编译静态版本..."
+    cd $SRC_DIR/squashfs-tools-4.6.1/squashfs-tools
+    make -j$(nproc) LDFLAGS="-static"
+    strip unsquashfs
+    cp unsquashfs /usr/local/bin/
 }
 
 download_iso() {
@@ -68,19 +84,19 @@ mount_filesystems() {
     [ -b "$NTFS_PARTITION" ] || { echo "错误：NTFS分区不存在"; exit 1; }
     [ -b "$EXT4_PARTITION" ] || { echo "错误：EXT4分区不存在"; exit 1; }
     mkdir -p $NTFS_MOUNT
-    echo "处理NTFS分区..."
+    
+    echo "挂载NTFS分区..."
     if ! mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT" 2>/dev/null; then
-        echo "检测到NTFS错误，尝试修复..."
-        ntfsfix  "$NTFS_PARTITION"
+        echo "尝试修复NTFS..."
+        ntfsfix -d "$NTFS_PARTITION"
         mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT" || {
-            echo "致命错误：无法挂载NTFS分区"
-            exit 1
+            echo "无法挂载NTFS分区"; exit 1
         }
     fi
 
     echo "检查ISO文件..."
     if [ ! -f "$ISO_PATH" ]; then
-        echo "未找到ISO文件，开始下载..."
+        echo "下载ISO文件..."
         umount "$NTFS_MOUNT"
         mount -t ntfs-3g -o rw "$NTFS_PARTITION" "$NTFS_MOUNT"
         download_iso
@@ -92,8 +108,7 @@ mount_filesystems() {
     mkdir -p $MOUNT_DIR
     fsck -y "$EXT4_PARTITION" || true
     mount "$EXT4_PARTITION" "$MOUNT_DIR" || {
-        echo "无法挂载EXT4分区"
-        exit 1
+        echo "无法挂载EXT4分区"; exit 1
     }
 }
 
@@ -109,9 +124,9 @@ extract_system() {
     local SFS_PATH="/mnt/iso/arch/x86_64/airootfs.sfs"
     [ -f "$SFS_PATH" ] || { echo "错误：找不到airootfs.sfs"; exit 1; }
 
-    echo "解压系统..."
+    echo "解压系统文件..."
     unsquashfs -f -d "$MOUNT_DIR" "$SFS_PATH" || {
-        echo "解压失败，尝试挂载方式..."
+        echo "解压失败，尝试直接挂载..."
         modprobe squashfs
         mount -t squashfs "$SFS_PATH" "$MOUNT_DIR"
     }
@@ -133,11 +148,11 @@ configure_system() {
 set -e
 echo "初始化Pacman密钥..."
 pacman-key --init
-pacman-key --populate
+pacman-key --populate archlinux endeavouros
 
 echo "配置镜像源..."
 cat > /etc/pacman.d/mirrorlist <<MIRROR
-Server = https://geo.mirror.pkgbuild.com/\$repo/os/\$arch
+Server = https://mirrors.bfsu.edu.cn/archlinux/\$repo/os/\$arch
 Server = https://mirror.rackspace.com/archlinux/\$repo/os/\$arch
 MIRROR
 pacman -Syy --noconfirm
@@ -158,7 +173,8 @@ echo "生成initramfs..."
 mkinitcpio -P
 
 echo "安装引导程序..."
-grub-install --target=i386-pc "$(lsblk -no pkname $EXT4_PARTITION)"
+DISK_DEVICE="$(lsblk -no pkname $EXT4_PARTITION)"
+grub-install --target=i386-pc "/dev/$DISK_DEVICE"
 grub-mkconfig -o /boot/grub/grub.cfg
 
 echo "启用SSH服务..."
