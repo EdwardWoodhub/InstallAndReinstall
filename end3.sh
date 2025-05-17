@@ -9,7 +9,7 @@ MOUNT_DIR="/root/system"             # 系统挂载点
 NTFS_MOUNT="/root/ntfs"              # NTFS挂载点
 ISO_NAME="endeavouros.iso"           # ISO文件名
 ISO_PATH="$NTFS_MOUNT/iso/$ISO_NAME" # ISO完整路径
-ISO_URL="https://mirrors.tuna.tsinghua.edu.cn/endeavouros/iso/EndeavourOS_Mercury-Neo-2025.03.19.iso"
+ISO_URL="https://mirror.alpix.eu/endeavouros/iso/EndeavourOS_Mercury-Neo-2025.03.19.iso"
 # ================================================
 
 cleanup() {
@@ -22,7 +22,7 @@ cleanup() {
         "$MOUNT_DIR" 
         "$NTFS_MOUNT" 
         "/mnt/iso"
-        "/mnt/squashfs"
+        "/mnt/squashfs_temp"
     )
     
     for mountpoint in "${mounts[@]}"; do
@@ -32,34 +32,29 @@ cleanup() {
         fi
     done
     
-    rm -rf "/tmp/iso.download"
+    rm -rf "/tmp/iso.download" "/mnt/squashfs_temp"
     echo "清理完成"
 }
 
 check_network() {
     echo "=== 网络连接检查 ==="
-    if ! ping -c 2 -W 3 mirrors.tuna.tsinghua.edu.cn &>/dev/null; then
-        echo "网络连接失败，尝试修复..."
-        
-        # 配置备用DNS
+    local test_host="mirror.alpix.eu"
+    
+    if ! ping -c 2 -W 3 $test_host &>/dev/null; then
         echo "配置备用DNS..."
         echo "nameserver 8.8.8.8" > /etc/resolv.conf
-        echo "nameserver 223.5.5.5" >> /etc/resolv.conf
+        echo "nameserver 1.1.1.1" >> /etc/resolv.conf
         
-        # 重启网络服务
-        if systemctl restart NetworkManager &>/dev/null || systemctl restart systemd-networkd &>/dev/null; then
-            echo "网络服务已重启"
-        else
-            echo "警告：无法自动重启网络，请手动检查"
-        fi
-        
-        # 二次检查
-        if ! ping -c 2 -W 3 mirrors.tuna.tsinghua.edu.cn &>/dev/null; then
-            echo "致命错误：网络连接不可用"
+        if ! ping -c 2 -W 3 $test_host &>/dev/null; then
+            echo "错误：无法连接到欧洲镜像"
+            echo "请检查："
+            echo "1. 防火墙设置"
+            echo "2. 网络电缆/无线连接"
+            echo "3. 代理配置"
             exit 1
         fi
     fi
-    echo "网络连接正常"
+    echo "网络连接验证通过"
 }
 
 check_dependencies() {
@@ -67,6 +62,7 @@ check_dependencies() {
     local required=(
         "mount" "lsblk" "fsck" "ntfsfix" 
         "genfstab" "modprobe" "cp" "ping"
+        "curl" "gzip"
     )
     local missing=()
     
@@ -111,36 +107,18 @@ download_iso() {
     local tmp_dir="/tmp/iso.download"
     mkdir -p "$tmp_dir"
     
-    # 检测下载工具
-    local downloader=""
-    for cmd in curl wget; do
-        if command -v "$cmd" &>/dev/null; then
-            downloader="$cmd"
+    # 带重试机制的下载
+    for i in {1..3}; do
+        if curl -L -k -C - -o "$tmp_dir/iso.tmp" "$ISO_URL" \
+            --connect-timeout 30 \
+            --retry 3 \
+            --retry-delay 10; then
             break
+        else
+            echo "下载失败，10秒后重试 ($i/3)..."
+            sleep 10
         fi
-    done
-    
-    [ -z "$downloader" ] && {
-        echo "错误：需要 curl/wget 来下载ISO"
-        exit 1
-    }
-
-    # 下载函数（带重试和超时）
-    case $downloader in
-        curl)
-            curl -L -k -C - -o "$tmp_dir/iso.tmp" "$ISO_URL" \
-                --connect-timeout 30 \
-                --retry 3 \
-                --retry-delay 10 \
-                --retry-max-time 300
-            ;;
-        wget)
-            wget -c -O "$tmp_dir/iso.tmp" "$ISO_URL" \
-                --timeout=30 \
-                --tries=3 \
-                --waitretry=10
-            ;;
-    esac || {
+    done || {
         echo "错误：ISO下载失败"
         exit 1
     }
@@ -198,7 +176,7 @@ mount_ext4() {
 
 extract_system() {
     echo "=== 解压系统文件 ==="
-    local temp_squashfs="/mnt/squashfs"
+    local temp_squashfs="/mnt/squashfs_temp"
     mkdir -p "$temp_squashfs" "/mnt/iso"
 
     # 挂载ISO
@@ -227,42 +205,38 @@ extract_system() {
     # 清理临时挂载
     umount "$temp_squashfs"
     umount "/mnt/iso"
-    rm -rf "$temp_squashfs"
 }
 
-configure_pacman() {
-    echo "=== 配置包管理器 ==="
-    # 创建镜像源列表（带备用源）
+configure_mirrors() {
+    echo "=== 配置欧洲镜像源 ==="
     cat > "$MOUNT_DIR/etc/pacman.d/mirrorlist" <<'EOL'
-## 清华大学镜像源
-Server = https://mirrors.tuna.tsinghua.edu.cn/archlinux/$repo/os/$arch
-## 阿里云镜像源
-Server = https://mirrors.aliyun.com/archlinux/$repo/os/$arch
-## 华为云镜像源
-Server = https://repo.huaweicloud.com/archlinux/$repo/os/$arch
-## 官方镜像源（备用）
-Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+## Germany
+Server = https://mirror.archlinux.de/archlinux/$repo/os/$arch
+Server = https://mirror.alpix.eu/archlinux/$repo/os/$arch
+## France
+Server = https://archlinux.mirrors.ovh.net/archlinux/$repo/os/$arch
+## Netherlands
+Server = https://ftp.nluug.nl/os/Linux/distr/archlinux/$repo/os/$arch
+## Sweden
+Server = https://ftp.acc.umu.se/mirror/archlinux/$repo/os/$arch
 EOL
+}
 
-    # 初始化密钥环
+initialize_keyring() {
+    echo "=== 初始化密钥环 ==="
+    # 使用欧洲密钥服务器
+    mkdir -p "$MOUNT_DIR/etc/pacman.d/gnupg"
+    echo "keyserver hkp://keys.openpgp.org" > "$MOUNT_DIR/etc/pacman.d/gnupg/gpg.conf"
+    
     chroot "$MOUNT_DIR" /bin/bash <<'EOF'
 #!/bin/bash
 set -e
+# 清理旧密钥环
+rm -rf /etc/pacman.d/gnupg/*
+# 初始化密钥环
 pacman-key --init
 pacman-key --populate archlinux
 EOF
-
-    # 强制更新数据库（三次重试）
-    local retry_count=0
-    until chroot "$MOUNT_DIR" pacman -Syy --noconfirm; do
-        ((retry_count++))
-        if [ $retry_count -ge 3 ]; then
-            echo "错误：数据库同步失败"
-            exit 1
-        fi
-        echo "数据库同步失败，10秒后重试 ($retry_count/3)..."
-        sleep 10
-    done
 }
 
 configure_system() {
@@ -297,7 +271,10 @@ echo ">> 更新系统时间..."
 timedatectl set-ntp true
 hwclock --hctosys
 
-echo ">> 安装基本软件包..."
+echo ">> 更新软件数据库..."
+pacman -Syy --noconfirm
+
+echo ">> 安装基本系统..."
 pacman -S --noconfirm base linux linux-firmware grub openssh sudo
 
 echo ">> 配置本地化..."
@@ -314,16 +291,12 @@ done
 echo ">> 安装引导程序..."
 grub-install --target=i386-pc "$(lsblk -no pkname $EXT4_PARTITION)"
 grub-mkconfig -o /boot/grub/grub.cfg
-
-echo ">> 启用SSH服务..."
-systemctl enable sshd.service
 EOF
 }
 
 main() {
-    echo "======= EndeavourOS 安装程序 ======="
-    echo "启动时间: $(date +'%F %T')"
-    
+    echo "======= EndeavourOS 欧洲镜像安装程序 ======="
+    echo "启动时间: $(date +'%Y-%m-%d %H:%M:%S')"
     check_network
     check_dependencies
     prepare_environment
@@ -348,7 +321,8 @@ main() {
     # EXT4处理流程
     mount_ext4
     extract_system
-    configure_pacman
+    configure_mirrors
+    initialize_keyring
     configure_system
     
     echo "=== 安装完成 ==="
