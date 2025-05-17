@@ -13,321 +13,250 @@ ISO_URL="https://mirrors.bfsu.edu.cn/endeavouros/iso/EndeavourOS_Mercury-Neo-202
 # ================================================
 
 cleanup() {
-    echo "执行清理操作..."
-    for mountpoint in $MOUNT_DIR/dev/pts $MOUNT_DIR/dev $MOUNT_DIR/proc $MOUNT_DIR/sys $MOUNT_DIR $NTFS_MOUNT /mnt/iso; do
-        umount -l $mountpoint 2>/dev/null || true
+    echo "=== 执行清理操作 ==="
+    local mounts=(
+        "$MOUNT_DIR/dev/pts" 
+        "$MOUNT_DIR/dev" 
+        "$MOUNT_DIR/proc" 
+        "$MOUNT_DIR/sys" 
+        "$MOUNT_DIR" 
+        "$NTFS_MOUNT" 
+        "/mnt/iso"
+    )
+    
+    for mountpoint in "${mounts[@]}"; do
+        if mountpoint -q "$mountpoint"; then
+            echo "卸载 $mountpoint"
+            umount -l "$mountpoint" 2>/dev/null || true
+        fi
     done
-    rm -rf /tmp/squashfs-*
+    
+    rm -rf "/tmp/iso.download"
     echo "清理完成"
 }
 
-prepare_environment() {
-    echo "=== 环境准备 ==="
-    {
-        modprobe loop && echo "loop模块已加载"
-        modprobe squashfs && echo "squashfs模块已加载"
-        modprobe fuse && echo "fuse模块已加载"
-    } || {
-        echo "警告：部分内核模块加载失败，尝试继续运行"
-    }
-    
-    echo "安装必要工具..."
-    if ! pacman -Sy --noconfirm curl gzip xz tar gcc make; then
-        echo "包管理器不可用，尝试最小化安装..."
-    fi
-}
-
-install_static_unsquashfs() {
-    echo "=== 安装静态编译版unsquashfs ==="
-    local TMP_DIR="/tmp/squashfs-static"
-    mkdir -p $TMP_DIR
-
-    echo "尝试从可靠源下载静态二进制..."
-    if ! curl -L -o $TMP_DIR/unsquashfs.gz \
-        "https://cdn.statically.io/gh/endeavouros-team/static-binaries/main/unsquashfs/unsquashfs-4.6.1.gz" \
-        --connect-timeout 30 --retry 3; then
-        echo "主镜像下载失败，尝试备用源..."
-        curl -L -o $TMP_DIR/unsquashfs.gz \
-            "https://raw.fastgit.org/endeavouros-team/static-binaries/main/unsquashfs/unsquashfs-4.6.1.gz" \
-            --connect-timeout 30 --retry 3
-    fi
-
-    echo "验证并安装二进制..."
-    if file $TMP_DIR/unsquashfs.gz | grep -q "gzip compressed"; then
-        gzip -d $TMP_DIR/unsquashfs.gz
-        mv $TMP_DIR/unsquashfs /usr/local/bin/
-        chmod +x /usr/local/bin/unsquashfs
-    else
-        echo "下载文件损坏，转为源码编译"
-        build_squashfs_from_source
-        return
-    fi
-
-    if ! /usr/local/bin/unsquashfs -version | grep -q "4.6.1"; then
-        echo "二进制验证失败，重新编译..."
-        build_squashfs_from_source
-    fi
-}
-
-build_squashfs_from_source() {
-    echo "=== 从源码编译squashfs-tools ==="
-    local SRC_DIR="/tmp/squashfs-src"
-    mkdir -p $SRC_DIR
-
-    echo "尝试从多个镜像下载源码..."
-    local MIRRORS=(
-        "https://github.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz"
-        "https://ghproxy.com/https://github.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz"
-        "https://hub.yzuu.cf/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz"
-        "https://kgithub.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz"
+check_dependencies() {
+    echo "=== 检查依赖项 ==="
+    local required=(
+        "mount" "lsblk" "fsck" "ntfsfix" 
+        "genfstab" "modprobe"
     )
-
-    for mirror in "${MIRRORS[@]}"; do
-        echo "正在尝试镜像源：$mirror"
-        if curl -L -o $SRC_DIR/squashfs.tar.gz "$mirror" \
-            --connect-timeout 20 \
-            --retry 3 \
-            --retry-delay 5; then
-            if tar -tzf $SRC_DIR/squashfs.tar.gz >/dev/null 2>&1; then
-                echo "下载验证成功"
-                break
-            else
-                echo "文件损坏，尝试下一个镜像"
-                rm -f $SRC_DIR/squashfs.tar.gz
-            fi
-        else
-            echo "下载失败，尝试下一个镜像"
-            continue
+    local missing=()
+    
+    for cmd in "${required[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd")
         fi
     done
-
-    if [ ! -f $SRC_DIR/squashfs.tar.gz ]; then
-        echo "错误：所有镜像源均不可用！"
+    
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "错误：缺少必要命令 - ${missing[*]}"
         exit 1
     fi
+}
 
-    echo "解压源码..."
-    tar -xzf $SRC_DIR/squashfs.tar.gz -C $SRC_DIR
+prepare_environment() {
+    echo "=== 初始化环境 ==="
+    for module in loop squashfs fuse; do
+        if ! modprobe "$module" 2>/dev/null; then
+            echo "警告：无法加载内核模块 $module"
+        fi
+    done
+}
 
-    echo "编译静态版本..."
-    cd $SRC_DIR/squashfs-tools-4.6.1/squashfs-tools
-    CFLAGS="-static -std=gnu90" make -j$(nproc) || {
-        echo "标准编译失败，尝试兼容模式..."
-        sed -i 's/-Werror//' Makefile
-        CFLAGS="-static -std=gnu90" make -j$(nproc)
-    }
-    strip unsquashfs
-    cp unsquashfs /usr/local/bin/
+mount_ntfs() {
+    echo "=== 处理NTFS分区 ==="
+    mkdir -p "$NTFS_MOUNT"
+    
+    # 先执行ntfsfix修复
+    echo "正在修复NTFS文件系统..."
+    ntfsfix -d "$NTFS_PARTITION"
+
+    # 挂载分区
+    if ! mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT"; then
+        echo "错误：NTFS分区挂载失败"
+        exit 1
+    fi
 }
 
 download_iso() {
     echo "=== 下载ISO文件 ==="
-    mkdir -p "$(dirname "$ISO_PATH")"
-    echo "使用镜像源：$ISO_URL"
-
-    for i in {1..3}; do
-        if curl -L -o "$ISO_PATH.part" -C - "$ISO_URL" --connect-timeout 60; then
-            mv "$ISO_PATH.part" "$ISO_PATH"
-            return 0
-        else
-            echo "下载中断，10秒后重试（第$i次）..."
-            sleep 10
+    local tmp_dir="/tmp/iso.download"
+    mkdir -p "$tmp_dir"
+    
+    # 检测下载工具
+    local downloader=""
+    for cmd in curl wget; do
+        if command -v "$cmd" &>/dev/null; then
+            downloader="$cmd"
+            break
         fi
     done
-    echo "错误：ISO下载失败！"
-    exit 1
+    
+    [ -z "$downloader" ] && {
+        echo "错误：需要 curl/wget 来下载ISO"
+        exit 1
+    }
+
+    # 下载函数
+    case $downloader in
+        curl)
+            curl -L -k -C - -o "$tmp_dir/iso.tmp" "$ISO_URL" \
+                --connect-timeout 30 \
+                --retry 3 \
+                --retry-delay 10
+            ;;
+        wget)
+            wget -c -O "$tmp_dir/iso.tmp" "$ISO_URL" \
+                --timeout=30 \
+                --tries=3 \
+                --waitretry=10
+            ;;
+    esac
+    
+    # 移动文件
+    mkdir -p "$(dirname "$ISO_PATH")"
+    mv "$tmp_dir/iso.tmp" "$ISO_PATH"
+    echo "ISO下载完成: $ISO_PATH"
 }
 
-mount_filesystems() {
-    echo "=== 挂载文件系统 ==="
-    [ -b "$NTFS_PARTITION" ] || { echo "错误：NTFS分区不存在"; exit 1; }
-    [ -b "$EXT4_PARTITION" ] || { echo "错误：EXT4分区不存在"; exit 1; }
+mount_ext4() {
+    echo "=== 处理EXT4分区 ==="
+    mkdir -p "$MOUNT_DIR"
     
-    echo "处理NTFS分区..."
-    mkdir -p $NTFS_MOUNT
-    if ! mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT" 2>/dev/null; then
-        echo "尝试修复NTFS..."
-        ntfsfix -d "$NTFS_PARTITION"
-        if ! mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT"; then
-            echo "紧急模式：只读挂载NTFS"
-            mount -t ntfs -o ro,force "$NTFS_PARTITION" "$NTFS_MOUNT" || {
-                echo "致命错误：无法挂载NTFS分区"
-                exit 1
-            }
-        fi
-    fi
-
-    echo "检查ISO文件..."
-    if [ ! -f "$ISO_PATH" ]; then
-        echo "需要下载ISO文件..."
-        umount "$NTFS_MOUNT"
-        mount -t ntfs-3g -o rw "$NTFS_PARTITION" "$NTFS_MOUNT"
-        download_iso
-        umount "$NTFS_MOUNT"
-        mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT"
-    fi
-
-    echo "准备系统分区..."
-    mkdir -p $MOUNT_DIR
-
-    echo "检查并修复EXT4文件系统..."
+    # 强制卸载可能残留的挂载
+    umount "$MOUNT_DIR" 2>/dev/null || true
+    
+    # 文件系统检查
     if ! fsck -y -f -C 0 "$EXT4_PARTITION"; then
-        echo "文件系统修复失败，尝试强制修复..."
-        fsck -y -f -C 0 -b 32768 "$EXT4_PARTITION" || {
-            echo "无法修复EXT4文件系统，请检查磁盘状态"
-            exit 1
-        }
-    fi
-
-    echo "挂载EXT4分区（读写模式）..."
-    if ! mount -o rw "$EXT4_PARTITION" "$MOUNT_DIR"; then
-        echo "挂载失败，尝试替代方法..."
-        mount -o rw,remount "$EXT4_PARTITION" "$MOUNT_DIR" 2>/dev/null || {
-            echo "尝试完整卸载后重新挂载..."
-            umount "$MOUNT_DIR" 2>/dev/null || true
-            mount -o rw "$EXT4_PARTITION" "$MOUNT_DIR" || {
-                echo "致命错误：无法以读写模式挂载EXT4分区"
-                echo "可能原因："
-                echo "1. 磁盘物理损坏"
-                echo "2. 文件系统严重错误"
-                echo "3. 内核不支持该文件系统"
-                exit 1
-            }
-        }
-    fi
-
-    echo "验证分区可写性..."
-    if ! touch "$MOUNT_DIR/.write_test" 2>/dev/null; then
-        echo "写入测试失败，分区仍为只读模式！"
-        echo "当前挂载信息："
-        mount | grep "$MOUNT_DIR"
-        echo "磁盘状态："
-        dmesg | grep "$EXT4_PARTITION"
+        echo "错误：无法修复文件系统"
         exit 1
     fi
-    rm -f "$MOUNT_DIR/.write_test"
+    
+    # 挂载分区
+    if ! mount -o rw,strictatime,data=ordered "$EXT4_PARTITION" "$MOUNT_DIR"; then
+        echo "错误：无法挂载EXT4分区"
+        exit 1
+    fi
+    
+    # 写入测试
+    local test_file="$MOUNT_DIR/.write_test"
+    if ! touch "$test_file"; then
+        echo "错误：分区仍为只读模式"
+        exit 1
+    fi
+    rm -f "$test_file"
 }
 
 extract_system() {
     echo "=== 解压系统文件 ==="
-    if ! command -v unsquashfs &>/dev/null; then
-        install_static_unsquashfs
+    mkdir -p "/mnt/iso"
+    
+    # 挂载ISO
+    if ! mount -o loop,ro "$ISO_PATH" "/mnt/iso"; then
+        echo "错误：无法挂载ISO文件"
+        exit 1
     fi
-
-    echo "挂载ISO镜像..."
-    mkdir -p /mnt/iso
-    mount -o loop,ro "$ISO_PATH" /mnt/iso
-
-    local SFS_PATH="/mnt/iso/arch/x86_64/airootfs.sfs"
-    [ -f "$SFS_PATH" ] || { echo "错误：找不到airootfs.sfs"; exit 1; }
-
-    echo "解压系统文件..."
-    if ! unsquashfs -f -d "$MOUNT_DIR" "$SFS_PATH"; then
-        echo "解压失败，尝试直接挂载..."
-        modprobe squashfs
-        mount -t squashfs "$SFS_PATH" "$MOUNT_DIR" || {
-            echo "致命错误：无法挂载squashfs"
-            exit 1
-        }
+    
+    # 定位squashfs文件
+    local sfs_path="/mnt/iso/arch/x86_64/airootfs.sfs"
+    [ -f "$sfs_path" ] || {
+        echo "错误：找不到airootfs.sfs"
+        exit 1
+    }
+    
+    # 解压系统
+    if command -v unsquashfs &>/dev/null; then
+        unsquashfs -f -d "$MOUNT_DIR" "$sfs_path"
+    else
+        mount -t squashfs "$sfs_path" "$MOUNT_DIR"
     fi
 }
 
 configure_system() {
     echo "=== 系统配置 ==="
-    
-    echo "预检系统目录..."
+    # 生成fstab
     mkdir -p "$MOUNT_DIR/etc"
-    if ! touch "$MOUNT_DIR/etc/fstab.test"; then
-        echo "错误：无法写入/etc目录"
-        echo "当前权限："
-        ls -ld "$MOUNT_DIR/etc"
-        exit 1
-    fi
-    rm -f "$MOUNT_DIR/etc/fstab.test"
-
-    echo "生成fstab..."
     genfstab -U "$MOUNT_DIR" > "$MOUNT_DIR/etc/fstab"
-    echo "生成的fstab内容："
-    cat "$MOUNT_DIR/etc/fstab"
-
-    echo "准备chroot环境..."
+    
+    # 准备chroot环境
     mount --bind /dev "$MOUNT_DIR/dev"
     mount --bind /proc "$MOUNT_DIR/proc"
     mount --bind /sys "$MOUNT_DIR/sys"
-
-    echo "执行chroot配置..."
+    
+    # 执行chroot配置
     chroot "$MOUNT_DIR" /bin/bash <<'EOF'
+#!/bin/bash
 set -e
-echo "初始化Pacman密钥..."
-pacman-key --init
-pacman-key --populate archlinux endeavouros
+export LC_ALL=C
 
-echo "配置镜像源..."
+echo ">> 配置镜像源..."
 cat > /etc/pacman.d/mirrorlist <<MIRROR
 Server = https://mirrors.bfsu.edu.cn/archlinux/\$repo/os/\$arch
 Server = https://mirrors.tuna.tsinghua.edu.cn/archlinux/\$repo/os/\$arch
 MIRROR
+
+echo ">> 初始化密钥环..."
+pacman-key --init
+pacman-key --populate archlinux
+
+echo ">> 更新系统..."
 pacman -Syy --noconfirm
+pacman -S --noconfirm base linux linux-firmware grub
 
-echo "安装基础系统..."
-pacman -S --noconfirm base linux linux-firmware grub openssh sudo
-
-echo "配置本地化..."
+echo ">> 配置本地化..."
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
-sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
 locale-gen
 echo "LANG=en_US.UTF-8" > /etc/locale.conf
 
-echo "设置root密码："
+echo ">> 设置root密码..."
 until passwd; do
     echo "密码设置失败，请重试..."
 done
 
-echo "生成initramfs..."
-mkinitcpio -P
-
-echo "安装引导程序..."
-DISK_DEVICE="$(lsblk -no pkname "$EXT4_PARTITION")"
-grub-install --target=i386-pc "/dev/$DISK_DEVICE"
+echo ">> 安装引导程序..."
+grub-install --target=i386-pc "$(lsblk -no pkname $EXT4_PARTITION)"
 grub-mkconfig -o /boot/grub/grub.cfg
 
-echo "启用SSH服务..."
+echo ">> 启用SSH服务..."
 systemctl enable sshd.service
-
-echo "安装云环境支持..."
-pacman -S --noconfirm cloud-init qemu-guest-agent
-systemctl enable cloud-init.service
-systemctl enable qemu-guest-agent.service
 EOF
 }
 
 main() {
-    echo "======= EndeavourOS 安装脚本 ======="
-    echo "启动时间：$(date +'%Y-%m-%d %T')"
-    echo "内核版本：$(uname -r)"
-    echo "内存信息："
-    free -h
-    
+    echo "======= EndeavourOS 安装程序 ======="
+    echo "启动时间: $(date +'%F %T')"
+    check_dependencies
     prepare_environment
-    mount_filesystems
+    
+    # NTFS处理流程
+    mount_ntfs
+    
+    # ISO检查与下载
+    if [ ! -f "$ISO_PATH" ]; then
+        echo "未找到ISO文件，开始下载..."
+        umount "$NTFS_MOUNT"
+        if mount -t ntfs-3g -o rw "$NTFS_PARTITION" "$NTFS_MOUNT"; then
+            download_iso
+            umount "$NTFS_MOUNT"
+            mount_ntfs
+        else
+            echo "错误：无法以读写模式挂载NTFS"
+            exit 1
+        fi
+    fi
+    
+    # EXT4处理流程
+    mount_ext4
     extract_system
     configure_system
-
-    echo "=== 安装完成！ ==="
-    echo "安装报告："
-    echo "- 目标分区：$EXT4_PARTITION"
-    echo "- 安装时间：$(date +'%Y-%m-%d %T')"
-    echo "- 内核版本：$(chroot $MOUNT_DIR uname -r)"
     
-    read -p "是否立即重启？(y/N) " -n 1 -r
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "系统将在5秒后重启..."
-        sleep 5
-        reboot
-    else
-        echo "请手动执行 reboot 命令重启"
-    fi
+    echo "=== 安装完成 ==="
+    echo "系统信息:"
+    chroot "$MOUNT_DIR" cat /etc/os-release
+    echo -e "\n请输入 reboot 重启系统"
 }
 
-# 执行主程序
+# 启动安装流程
 main
