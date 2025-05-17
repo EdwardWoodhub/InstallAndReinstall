@@ -22,6 +22,7 @@ cleanup() {
         "$MOUNT_DIR" 
         "$NTFS_MOUNT" 
         "/mnt/iso"
+        "/mnt/squashfs"
     )
     
     for mountpoint in "${mounts[@]}"; do
@@ -39,7 +40,7 @@ check_dependencies() {
     echo "=== 检查依赖项 ==="
     local required=(
         "mount" "lsblk" "fsck" "ntfsfix" 
-        "genfstab" "modprobe"
+        "genfstab" "modprobe" "cp"
     )
     local missing=()
     
@@ -167,8 +168,9 @@ mount_ext4() {
 
 extract_system() {
     echo "=== 解压系统文件 ==="
-    mkdir -p "/mnt/iso"
-    
+    local temp_squashfs="/mnt/squashfs"
+    mkdir -p "$temp_squashfs" "/mnt/iso"
+
     # 挂载ISO
     if ! mount -o loop,ro "$ISO_PATH" "/mnt/iso"; then
         echo "错误：无法挂载ISO文件"
@@ -181,25 +183,35 @@ extract_system() {
         echo "错误：找不到airootfs.sfs"
         exit 1
     }
-    
-    # 解压系统
-    if command -v unsquashfs &>/dev/null; then
-        unsquashfs -f -d "$MOUNT_DIR" "$sfs_path"
-    else
-        mount -t squashfs "$sfs_path" "$MOUNT_DIR"
+
+    # 挂载squashfs到临时目录
+    if ! mount -t squashfs -o ro "$sfs_path" "$temp_squashfs"; then
+        echo "错误：无法挂载squashfs文件"
+        exit 1
     fi
+
+    # 复制文件到系统目录（保持权限）
+    echo "正在复制系统文件..."
+    cp -a "$temp_squashfs/"* "$MOUNT_DIR/"
+
+    # 清理临时挂载
+    umount "$temp_squashfs"
+    umount "/mnt/iso"
+    rm -rf "$temp_squashfs"
 }
 
 configure_system() {
     echo "=== 系统配置 ==="
-    # 预检目录权限
-    if ! touch "$MOUNT_DIR/etc/.write_test"; then
-        echo "错误：无法写入系统目录"
-        echo "当前挂载选项："
+    # 二次挂载验证
+    if ! touch "$MOUNT_DIR/etc/.config_test"; then
+        echo "致命错误：文件系统仍为只读状态"
+        echo "当前挂载信息："
         mount | grep "$MOUNT_DIR"
+        echo "设备信息："
+        lsblk -o NAME,MOUNTPOINT,FSTYPE,STATE,RO "$EXT4_PARTITION"
         exit 1
     fi
-    rm -f "$MOUNT_DIR/etc/.write_test"
+    rm -f "$MOUNT_DIR/etc/.config_test"
 
     # 生成fstab
     mkdir -p "$MOUNT_DIR/etc"
