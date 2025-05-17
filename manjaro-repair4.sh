@@ -30,8 +30,8 @@ trap cleanup EXIT
 install_deps() {
   echo "===== 安装依赖工具 ====="
   # 清除潜在冲突
-  apt-get remove --purge fuse3 -y 2>/dev/null || true
-  apt-mark hold fuse3 2>/dev/null || true
+  #apt-get remove --purge fuse3 -y 2>/dev/null || true
+  #apt-mark hold fuse3 2>/dev/null || true
 
   # Debian软件源配置
   if grep -qi "debian" /etc/os-release; then
@@ -43,7 +43,7 @@ install_deps() {
   # 更新并安装核心组件
   apt-get update -qq
   apt-get install -y --no-install-recommends \
-    fuse=2.9.9-* \
+    fuse3 \
     squashfs-tools \
     unionfs-fuse \
     ntfs-3g \
