@@ -91,7 +91,7 @@ mount_filesystems() {
     echo "处理NTFS分区..."
     if ! mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT" 2>/dev/null; then
         echo "检测到NTFS错误，尝试修复..."
-        ntfsfix -d "$NTFS_PARTITION"
+        ntfsfix  "$NTFS_PARTITION"
         mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT" || {
             echo "致命错误：无法挂载NTFS分区"
             exit 1
