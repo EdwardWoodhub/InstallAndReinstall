@@ -30,7 +30,7 @@ trap cleanup EXIT
 install_deps() {
   echo "===== 安装依赖工具 ====="
   apt-get update -qq
-  apt-get install -y squashfs-tools unionfs-fuse fuse wget || {
+  apt-get install -y squashfs-tools unionfs-fuse fuse wget ntfs-3g || {
     echo "[-] 依赖安装失败"
     exit 1
   }
