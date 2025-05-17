@@ -124,28 +124,45 @@ mount_ext4() {
     echo "=== 处理EXT4分区 ==="
     mkdir -p "$MOUNT_DIR"
     
-    # 强制卸载可能残留的挂载
-    umount "$MOUNT_DIR" 2>/dev/null || true
-    
-    # 文件系统检查
+    # 强制卸载可能存在的残留挂载
+    umount "$MOUNT_DIR" 2>/dev/null || {
+        echo "警告：存在残留挂载，尝试强制卸载..."
+        umount -l "$MOUNT_DIR" || true
+    }
+
+    # 深度文件系统修复
+    echo "执行深度文件系统检查..."
     if ! fsck -y -f -C 0 "$EXT4_PARTITION"; then
-        echo "错误：无法修复文件系统"
-        exit 1
+        echo "错误：文件系统修复失败，尝试备份superblock..."
+        local backup_sb=$(mkfs.ext4 -n "$EXT4_PARTITION" 2>/dev/null | awk '/Backup superblock/{print $NF}')
+        [ -z "$backup_sb" ] && backup_sb=32768
+        fsck -y -b $backup_sb "$EXT4_PARTITION" || {
+            echo "致命错误：无法修复文件系统"
+            exit 1
+        }
     fi
-    
-    # 挂载分区
-    if ! mount -o rw,strictatime,data=ordered "$EXT4_PARTITION" "$MOUNT_DIR"; then
-        echo "错误：无法挂载EXT4分区"
-        exit 1
-    fi
-    
-    # 写入测试
-    local test_file="$MOUNT_DIR/.write_test"
-    if ! touch "$test_file"; then
-        echo "错误：分区仍为只读模式"
-        exit 1
-    fi
-    rm -f "$test_file"
+
+    # 挂载分区（强制读写模式）
+    echo "挂载分区..."
+    for i in {1..3}; do
+        if mount -o rw,nodelalloc,strictatime,data=ordered "$EXT4_PARTITION" "$MOUNT_DIR"; then
+            # 写入验证
+            if touch "$MOUNT_DIR/.rw_test"; then
+                rm -f "$MOUNT_DIR/.rw_test"
+                echo "挂载验证成功"
+                return 0
+            fi
+            echo "写入测试失败，尝试重新挂载 ($i/3)..."
+            umount "$MOUNT_DIR"
+        fi
+        sleep 1
+    done
+
+    echo "致命错误：无法以读写模式挂载分区"
+    echo "调试信息："
+    lsblk -o NAME,FSTYPE,STATE,MOUNTPOINT,RO "$EXT4_PARTITION"
+    dmesg | grep -i -A10 "$EXT4_PARTITION"
+    exit 1
 }
 
 extract_system() {
@@ -175,6 +192,15 @@ extract_system() {
 
 configure_system() {
     echo "=== 系统配置 ==="
+    # 预检目录权限
+    if ! touch "$MOUNT_DIR/etc/.write_test"; then
+        echo "错误：无法写入系统目录"
+        echo "当前挂载选项："
+        mount | grep "$MOUNT_DIR"
+        exit 1
+    fi
+    rm -f "$MOUNT_DIR/etc/.write_test"
+
     # 生成fstab
     mkdir -p "$MOUNT_DIR/etc"
     genfstab -U "$MOUNT_DIR" > "$MOUNT_DIR/etc/fstab"
