@@ -10,7 +10,6 @@ NTFS_MOUNT="/root/ntfs"              # NTFS挂载点
 ISO_NAME="endeavouros.iso"           # ISO文件名
 ISO_PATH="$NTFS_MOUNT/iso/$ISO_NAME" # ISO完整路径
 ISO_URL="https://mirror.alpix.eu/endeavouros/iso/EndeavourOS_Mercury-Neo-2025.03.19.iso"
-SQUASHFS_TOOLS_URL="https://archive.archlinux.org/packages/s/s/squashfs-tools/squashfs-tools-4.6.1-1-x86_64.pkg.tar.zst"
 # ================================================
 
 cleanup() {
@@ -18,7 +17,7 @@ cleanup() {
     for mountpoint in $MOUNT_DIR/dev/pts $MOUNT_DIR/dev $MOUNT_DIR/proc $MOUNT_DIR/sys $MOUNT_DIR $NTFS_MOUNT /mnt/iso; do
         umount -l $mountpoint 2>/dev/null || true
     done
-    rm -rf /tmp/squashfs-tools
+    rm -rf /tmp/squashfs-static
 }
 
 prepare_environment() {
@@ -26,49 +25,30 @@ prepare_environment() {
     modprobe loop || true
     modprobe squashfs || true
     modprobe fuse || true
-    # 安装必要依赖
-    pacman -Sy --noconfirm zstd curl || true
+    pacman -Sy --noconfirm curl 2>/dev/null || true
 }
 
-install_squashfs_tools() {
-    echo "=== 安装squashfs工具 ==="
-    local TMP_DIR="/tmp/squashfs-tools"
+install_static_unsquashfs() {
+    echo "=== 安装静态编译版unsquashfs ==="
+    local TMP_DIR="/tmp/squashfs-static"
     mkdir -p $TMP_DIR
 
-    echo "下载squashfs-tools..."
-    if ! curl -L -o "$TMP_DIR/pkg.tar.zst" "$SQUASHFS_TOOLS_URL"; then
-        echo "错误：无法下载squashfs-tools，尝试编译安装..."
-        build_squashfs_from_source
-        return
-    fi
-
-    echo "解压软件包..."
-    tar -I zstd -xf "$TMP_DIR/pkg.tar.zst" -C $TMP_DIR
-
-    echo "部署二进制文件..."
-    # 修正路径处理
-    [ -d "$TMP_DIR/usr/bin" ] && cp -v $TMP_DIR/usr/bin/*squashfs /usr/local/bin/
-    [ -d "$TMP_DIR/usr/lib" ] && cp -vr $TMP_DIR/usr/lib/* /usr/local/lib/
-    ldconfig 2>/dev/null || true
-
-    if ! unsquashfs -version; then
-        echo "错误：squashfs-tools安装失败！"
+    echo "下载静态二进制文件..."
+    if ! curl -L -o $TMP_DIR/unsquashfs.static \
+        https://github.com/plougher/squashfs-tools/releases/download/4.6.1/squashfs4.6.1.tar.gz; then
+        echo "错误：无法下载静态二进制文件"
         exit 1
     fi
-}
 
-build_squashfs_from_source() {
-    echo "=== 从源码编译squashfs-tools ==="
-    local SRC_DIR="/tmp/squashfs-src"
-    mkdir -p $SRC_DIR
+    echo "解压并部署..."
+    tar -xzf $TMP_DIR/unsquashfs.static -C $TMP_DIR
+    find $TMP_DIR -name 'unsquashfs' -exec cp -v {} /usr/local/bin/ \;
+    chmod +x /usr/local/bin/unsquashfs
 
-    echo "下载源码..."
-    curl -L https://github.com/plougher/squashfs-tools/archive/refs/tags/4.6.1.tar.gz | tar xz -C $SRC_DIR
-
-    echo "编译安装..."
-    cd $SRC_DIR/squashfs-tools-4.6.1/squashfs-tools
-    make -j$(nproc)
-    cp unsquashfs /usr/local/bin/
+    if ! unsquashfs -version; then
+        echo "错误：unsquashfs安装失败！"
+        exit 1
+    fi
 }
 
 download_iso() {
@@ -78,9 +58,6 @@ download_iso() {
     echo "下载地址：$ISO_URL"
     if ! curl -L -o "$ISO_PATH.part" -C - "$ISO_URL"; then
         echo "错误：ISO下载失败！"
-        echo "可能原因："
-        echo "1. 网络连接异常"
-        echo "2. 磁盘空间不足"
         exit 1
     fi
     mv "$ISO_PATH.part" "$ISO_PATH"
@@ -123,7 +100,7 @@ mount_filesystems() {
 extract_system() {
     echo "=== 解压系统文件 ==="
     if ! command -v unsquashfs &>/dev/null; then
-        install_squashfs_tools
+        install_static_unsquashfs
     fi
 
     echo "挂载ISO镜像..."
@@ -159,7 +136,10 @@ pacman-key --init
 pacman-key --populate
 
 echo "配置镜像源..."
-reflector --latest 5 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+cat > /etc/pacman.d/mirrorlist <<MIRROR
+Server = https://geo.mirror.pkgbuild.com/\$repo/os/\$arch
+Server = https://mirror.rackspace.com/archlinux/\$repo/os/\$arch
+MIRROR
 pacman -Syy --noconfirm
 
 echo "安装基础系统..."
@@ -183,11 +163,6 @@ grub-mkconfig -o /boot/grub/grub.cfg
 
 echo "启用SSH服务..."
 systemctl enable sshd.service
-
-echo "安装云环境支持..."
-pacman -S --noconfirm cloud-init qemu-guest-agent
-systemctl enable cloud-init.service
-systemctl enable qemu-guest-agent.service
 EOF
 }
 
