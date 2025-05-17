@@ -109,6 +109,7 @@ mount_filesystems() {
     fi
 
     echo "挂载EXT4系统分区..."
+    mkdir -p $MOUNT_DIR
     fsck -y "$EXT4_PARTITION" || true
     mount "$EXT4_PARTITION" "$MOUNT_DIR" || {
         echo "无法挂载EXT4分区"
