@@ -42,7 +42,7 @@ install_deps() {
   # 更新并修复基础环境
   apt-get update -qq
   apt-get install -f -y
-  apt-get autoremove -y
+  #apt-get autoremove -y
 
   # 安装指定版本软件包
   echo "[+] 安装核心组件"
