@@ -277,7 +277,7 @@ finalize() {
 		
 	EOF
 	
-	reflector -l 35 -p https --sort rate --save /etc/pacman.d/mirrorlist
+	# reflector -l 35 -p https --sort rate --save /etc/pacman.d/mirrorlist
 
 	cat <<-EOF
 		Hi,
