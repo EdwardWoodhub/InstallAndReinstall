@@ -10,8 +10,11 @@ NTFS_MOUNT="/root/ntfs"              # NTFS挂载点
 ISO_NAME="endeavouros.iso"           # ISO文件名
 ISO_PATH="$NTFS_MOUNT/iso/$ISO_NAME" # ISO完整路径
 ISO_URL="https://mirror.alpix.eu/endeavouros/iso/EndeavourOS_Mercury-Neo-2025.03.19.iso"
+ARCH_KEY="DDB867B92AA789C165EEFA799B729B06A40C17EA"
+EOS_KEY="7D42C7F45FCFBFF7"
 # ================================================
 
+# ================= 全局函数 =================
 cleanup() {
     echo "=== 执行清理操作 ==="
     local mounts=(
@@ -36,379 +39,180 @@ cleanup() {
     echo "清理完成"
 }
 
-check_network() {
-    echo "=== 网络连接检查 ==="
-    local test_host="mirror.alpix.eu"
-    
-    if ! ping -c 2 -W 3 $test_host &>/dev/null; then
-        echo "配置备用DNS..."
-        echo "nameserver 8.8.8.8" > /etc/resolv.conf
-        echo "nameserver 1.1.1.1" >> /etc/resolv.conf
-        
-        if ! ping -c 2 -W 3 $test_host &>/dev/null; then
-            echo "错误：无法连接到欧洲镜像"
-            echo "请检查："
-            echo "1. 防火墙设置"
-            echo "2. 网络电缆/无线连接"
-            echo "3. 代理配置"
-            exit 1
-        fi
-    fi
-    echo "网络连接验证通过"
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
-check_dependencies() {
-    echo "=== 检查依赖项 ==="
-    local required=(
-        "mount" "lsblk" "fsck" "ntfsfix" 
-        "genfstab" "modprobe" "cp" "ping"
-        "curl" "gzip" "wget" "reflector"
-    )
-    local missing=()
-    
-    for cmd in "${required[@]}"; do
-        if ! command -v "$cmd" &>/dev/null; then
-            missing+=("$cmd")
-        fi
-    done
-    
-    if [ ${#missing[@]} -gt 0 ]; then
-        echo "检测到缺失命令: ${missing[*]}"
-        
-        # 动态修复reflector缺失
-        if [[ " ${missing[*]} " == *"reflector"* ]]; then
-            echo ">>> 正在自动安装reflector..."
-            
-            # 配置临时镜像源
-            echo "Server = https://mirror.archlinux.de/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
-            echo "Server = https://ftp.nluug.nl/os/Linux/distr/archlinux/\$repo/os/\$arch" >> /etc/pacman.d/mirrorlist
-            
-            # 修复密钥环
-            echo "初始化密钥环..."
-            pacman-key --init
-            pacman-key --populate archlinux
-            
-            # 强制更新数据库
-            echo "同步软件数据库..."
-            pacman -Sy --noconfirm archlinux-keyring
-            
-            # 安装reflector
-            if ! pacman -S --noconfirm reflector; then
-                echo ">>> 尝试备用安装方案..."
-                curl -LO https://geo.mirror.pkgbuild.com/extra/os/x86_64/reflector-2023-9-any.pkg.tar.zst
-                pacman -U --noconfirm reflector-*.pkg.tar.zst
-                rm -f reflector-*.pkg.tar.zst
-            fi
-            
-            # 二次验证
-            if command -v reflector &>/dev/null; then
-                echo "reflector 安装成功"
-                missing=("${missing[@]/reflector}")
-            else
-                echo "错误：无法自动安装reflector"
-                exit 1
-            fi
-        fi
-        
-        # 检查剩余缺失项
-        if [ ${#missing[@]} -gt 0 ]; then
-            echo "错误：仍需手动安装 - ${missing[*]}"
-            exit 1
-        fi
-    fi
-    echo "所有依赖项已满足"
-}
+retry_command() {
+    local cmd=$1
+    local max_retries=${2:-3}
+    local delay=${3:-10}
+    local retries=0
 
-prepare_environment() {
-    echo "=== 初始化环境 ==="
-    for module in loop squashfs fuse; do
-        if ! modprobe "$module" 2>/dev/null; then
-            echo "警告：无法加载内核模块 $module"
-        fi
-    done
-}
-
-mount_ntfs() {
-    echo "=== 处理NTFS分区 ==="
-    mkdir -p "$NTFS_MOUNT"
-    
-    # 先执行ntfsfix修复
-    echo "正在修复NTFS文件系统..."
-    ntfsfix -d "$NTFS_PARTITION"
-
-    # 挂载分区
-    if ! mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT"; then
-        echo "错误：NTFS分区挂载失败"
-        exit 1
-    fi
-}
-
-download_iso() {
-    echo "=== 下载ISO文件 ==="
-    local tmp_dir="/tmp/iso.download"
-    mkdir -p "$tmp_dir"
-    
-    # 带重试机制的下载
-    for i in {1..3}; do
-        if curl -L -k -C - -o "$tmp_dir/iso.tmp" "$ISO_URL" \
-            --connect-timeout 30 \
-            --retry 3 \
-            --retry-delay 10; then
-            break
+    while true; do
+        if eval "$cmd"; then
+            return 0
         else
-            echo "下载失败，10秒后重试 ($i/3)..."
-            sleep 10
-        fi
-    done || {
-        echo "错误：ISO下载失败"
-        exit 1
-    }
-    
-    # 移动文件
-    mkdir -p "$(dirname "$ISO_PATH")"
-    mv "$tmp_dir/iso.tmp" "$ISO_PATH"
-    echo "ISO下载完成: $ISO_PATH"
-}
-
-mount_ext4() {
-    echo "=== 处理EXT4分区 ==="
-    mkdir -p "$MOUNT_DIR"
-    
-    # 强制卸载可能存在的残留挂载
-    umount "$MOUNT_DIR" 2>/dev/null || {
-        echo "警告：存在残留挂载，尝试强制卸载..."
-        umount -l "$MOUNT_DIR" || true
-    }
-
-    # 深度文件系统修复
-    echo "执行深度文件系统检查..."
-    if ! fsck -y -f -C 0 "$EXT4_PARTITION"; then
-        echo "错误：文件系统修复失败，尝试备份superblock..."
-        local backup_sb=$(mkfs.ext4 -n "$EXT4_PARTITION" 2>/dev/null | awk '/Backup superblock/{print $NF}')
-        [ -z "$backup_sb" ] && backup_sb=32768
-        fsck -y -b $backup_sb "$EXT4_PARTITION" || {
-            echo "致命错误：无法修复文件系统"
-            exit 1
-        }
-    fi
-
-    # 挂载分区（强制读写模式）
-    echo "挂载分区..."
-    for i in {1..3}; do
-        if mount -o rw,nodelalloc,strictatime,data=ordered "$EXT4_PARTITION" "$MOUNT_DIR"; then
-            # 写入验证
-            if touch "$MOUNT_DIR/.rw_test"; then
-                rm -f "$MOUNT_DIR/.rw_test"
-                echo "挂载验证成功"
-                return 0
+            ((retries++))
+            if [ $retries -ge $max_retries ]; then
+                return 1
             fi
-            echo "写入测试失败，尝试重新挂载 ($i/3)..."
-            umount "$MOUNT_DIR"
+            log "操作失败，${delay}秒后重试 (${retries}/${max_retries})"
+            sleep $delay
         fi
-        sleep 1
     done
-
-    echo "致命错误：无法以读写模式挂载分区"
-    echo "调试信息："
-    lsblk -o NAME,FSTYPE,STATE,MOUNTPOINT,RO "$EXT4_PARTITION"
-    dmesg | grep -i -A10 "$EXT4_PARTITION"
-    exit 1
 }
 
-extract_system() {
-    echo "=== 解压系统文件 ==="
-    local temp_squashfs="/mnt/squashfs_temp"
-    mkdir -p "$temp_squashfs" "/mnt/iso"
+# ================= 核心功能 =================
+init_system() {
+    log "=== 初始化系统环境 ==="
+    
+    # 强制同步硬件时钟
+    log "同步硬件时钟..."
+    hwclock --hctosys --utc
+    
+    # 配置应急DNS
+    echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+    
+    # 加载内核模块
+    for module in loop squashfs fuse; do
+        modprobe $module || log "警告：无法加载 $module 模块"
+    done
+}
 
-    # 挂载ISO
-    if ! mount -o loop,ro "$ISO_PATH" "/mnt/iso"; then
-        echo "错误：无法挂载ISO文件"
-        exit 1
+fix_trustdb() {
+    log "=== 修复信任数据库 ==="
+    
+    # 重置密钥环
+    rm -rf /etc/pacman.d/gnupg/*
+    pacman-key --init
+    
+    # 导入关键密钥
+    import_key() {
+        local key=$1
+        log "导入密钥 $key"
+        retry_command "pacman-key --recv-keys $key" 3 5
+        pacman-key --lsign-key $key
+    }
+    
+    import_key $ARCH_KEY
+    import_key $EOS_KEY
+    
+    # 更新密钥数据库
+    pacman-key --refresh-keys
+    pacman -Sy --noconfirm archlinux-keyring
+}
+
+config_mirrors() {
+    log "=== 配置镜像源 ==="
+    
+    # 安装reflector
+    if ! command -v reflector &>/dev/null; then
+        log "安装reflector..."
+        pacman -Sy --noconfirm reflector
     fi
     
-    # 定位squashfs文件
-    local sfs_path="/mnt/iso/arch/x86_64/airootfs.sfs"
-    [ -f "$sfs_path" ] || {
-        echo "错误：找不到airootfs.sfs"
-        exit 1
-    }
-
-    # 挂载squashfs到临时目录
-    if ! mount -t squashfs -o ro "$sfs_path" "$temp_squashfs"; then
-        echo "错误：无法挂载squashfs文件"
-        exit 1
-    fi
-
-    # 复制文件到系统目录（保持权限）
-    echo "正在复制系统文件..."
-    cp -a "$temp_squashfs/"* "$MOUNT_DIR/"
-
-    # 清理临时挂载
-    umount "$temp_squashfs"
-    umount "/mnt/iso"
-}
-
-configure_mirrors() {
-    echo "=== 生成优化镜像源 ==="
+    # 生成优化镜像源
     reflector \
-        --verbose \
         --country France,Germany,Netherlands,Sweden \
         --protocol https \
         --latest 30 \
         --sort rate \
-        --save "$MOUNT_DIR/etc/pacman.d/mirrorlist"
+        --save /etc/pacman.d/mirrorlist
     
-    # 添加EndeavourOS专用源
-    cat >> "$MOUNT_DIR/etc/pacman.d/mirrorlist" <<'EOL'
+    # 添加EndeavourOS源
+    cat >> /etc/pacman.d/mirrorlist <<EOL
 ## EndeavourOS 欧洲源
-Server = https://mirror.alpix.eu/endeavouros/repo/$repo/$arch
+Server = https://mirror.alpix.eu/endeavouros/repo/\$repo/\$arch
 EOL
 
-    # 强制使用欧洲DNS
-    mkdir -p "$MOUNT_DIR/etc"
-    echo "nameserver 8.8.8.8" > "$MOUNT_DIR/etc/resolv.conf"
-    echo "nameserver 1.1.1.1" >> "$MOUNT_DIR/etc/resolv.conf"
+    # 验证镜像源
+    if ! curl -I https://mirror.archlinux.de &>/dev/null; then
+        log "错误：镜像源不可达"
+        exit 1
+    fi
 }
 
-initialize_keyring() {
-    echo "=== 强化密钥初始化 ==="
-    # 安装必要依赖
-    chroot "$MOUNT_DIR" /bin/bash <<'EOF'
-#!/bin/bash
-set -e
-pacman -Syy --noconfirm --needed \
-    gnupg gpgme libassuan libgpg-error
-
-# 修复/dev/fd符号链接
-ln -sf /proc/self/fd /dev/fd
-
-# 强制重置密钥环
-rm -rf /etc/pacman.d/gnupg
-mkdir -p /etc/pacman.d/gnupg
-pacman-key --init
-
-# 导入官方密钥
-curl -sL "https://archlinux.org/people/developers-keys/" | \
-    grep -Eo '0x[0-9A-F]{16}' | \
-    xargs pacman-key --recv-keys
-
-# 信任密钥
-pacman-key --populate archlinux endeavouros
-EOF
-}
-
-configure_system() {
-    echo "=== 系统配置强化 ==="
-    # 准备chroot环境
-    mount --bind /dev "$MOUNT_DIR/dev"
-    mount -t proc proc "$MOUNT_DIR/proc"
-    mount -t sysfs sys "$MOUNT_DIR/sys"
-    mount -t devpts devpts "$MOUNT_DIR/dev/pts"
+mount_partitions() {
+    log "=== 处理存储分区 ==="
     
-    # 执行chroot配置
-    chroot "$MOUNT_DIR" /bin/bash <<'EOF'
+    # NTFS分区处理
+    mkdir -p $NTFS_MOUNT
+    ntfsfix -d $NTFS_PARTITION
+    mount -t ntfs-3g -o ro $NTFS_PARTITION $NTFS_MOUNT
+    
+    # EXT4分区处理
+    mkdir -p $MOUNT_DIR
+    fsck -y -f $EXT4_PARTITION
+    mount -o rw,nodelalloc $EXT4_PARTITION $MOUNT_DIR
+}
+
+deploy_system() {
+    log "=== 部署操作系统 ==="
+    
+    # 挂载ISO
+    mkdir -p /mnt/iso
+    mount -o loop,ro $ISO_PATH /mnt/iso
+    
+    # 解压squashfs
+    mkdir -p /mnt/squashfs
+    mount -t squashfs /mnt/iso/arch/x86_64/airootfs.sfs /mnt/squashfs
+    cp -a /mnt/squashfs/* $MOUNT_DIR
+    
+    # 准备chroot环境
+    mount --bind /dev $MOUNT_DIR/dev
+    mount -t proc proc $MOUNT_DIR/proc
+    mount -t sysfs sys $MOUNT_DIR/sys
+}
+
+config_system() {
+    log "=== 系统配置 ==="
+    
+    # 生成fstab
+    genfstab -U $MOUNT_DIR > $MOUNT_DIR/etc/fstab
+    
+    chroot $MOUNT_DIR /bin/bash <<EOL
 #!/bin/bash
 set -e
-export LC_ALL=C
 
-echo ">> 同步硬件时钟..."
-hwclock --hctosys --utc
+# 基础配置
+ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+hwclock --systohc
+sed -i 's/#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
+locale-gen
+echo "LANG=en_US.UTF-8" > /etc/locale.conf
 
-echo ">> 更新软件仓库..."
+# 内核安装
 pacman -Syy --noconfirm
+pacman -S --noconfirm linux linux-headers linux-firmware
 
-echo ">> 安装核心组件..."
-pacman -S --noconfirm --needed \
-    base linux linux-headers linux-firmware \
-    systemd glibc grub efibootmgr networkmanager
-
-echo ">> 修复初始化系统链接..."
-ln -sf /usr/lib/systemd/systemd /sbin/init
-ln -sf /usr/lib/systemd/systemd /usr/lib/systemd/systemd-udevd
-
-echo ">> 生成initramfs..."
-mkinitcpio_conf="/etc/mkinitcpio.conf"
-sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect modconf block filesystems keyboard fsck)/' $mkinitcpio_conf
-mkinitcpio -P
-
-echo ">> 配置GRUB引导参数..."
-ROOT_UUID=$(blkid -s UUID -o value $EXT4_PARTITION)
-cat > /etc/default/grub <<GRUB_CFG
-GRUB_DEFAULT=0
-GRUB_TIMEOUT=5
-GRUB_DISTRIBUTOR="EndeavourOS"
-GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3 quiet"
-GRUB_CMDLINE_LINUX="init=/usr/lib/systemd/systemd root=UUID=$ROOT_UUID"
-GRUB_PRELOAD_MODULES="part_gpt part_msdos"
-GRUB_TERMINAL_INPUT=console
-GRUB_TERMINAL_OUTPUT=console
-GRUB_DISABLE_OS_PROBER=true
-GRUB_GFXMODE=auto
-GRUB_GFXPAYLOAD_LINUX=keep
-GRUB_SAVEDEFAULT=false
-GRUB_CFG
-
-echo ">> 安装GRUB引导..."
-TARGET_DISK=$(lsblk -no pkname $(mount | awk '$3 == "/" {print $1}'))
-grub-install --target=i386-pc --recheck --debug "/dev/$TARGET_DISK"
+# 引导配置
+grub-install --target=i386-pc --recheck $(lsblk -no pkname $EXT4_PARTITION)
 grub-mkconfig -o /boot/grub/grub.cfg
 
-echo ">> 启用网络服务..."
-systemctl enable NetworkManager.service
-
-echo ">> 最终验证..."
-ls -l /usr/lib/systemd/systemd /sbin/init
-lsinitcpio /boot/initramfs-linux.img | grep -q systemd || exit 1
-EOF
-
-    # 安装后验证
-    echo "=== 安装后验证 ==="
-    if [ ! -f "$MOUNT_DIR/boot/grub/i386-pc/normal.mod" ]; then
-        echo "错误：GRUB模块缺失！"
-        exit 1
-    fi
-    if ! chroot "$MOUNT_DIR" pacman -Q linux systemd grub; then
-        echo "错误：核心组件未正确安装！"
-        exit 1
-    fi
+# 网络配置
+systemctl enable NetworkManager
+echo "EndeavourOS" > /etc/hostname
+EOL
 }
 
+# ================= 主流程 =================
 main() {
-    echo "======= EndeavourOS 欧洲镜像安装程序 ======="
-    echo "启动时间: $(date +'%Y-%m-%d %H:%M:%S')"
-    check_network
-    check_dependencies
-    prepare_environment
+    [ $EUID -ne 0 ] && echo "必须使用root权限运行" && exit 1
     
-    # NTFS处理流程
-    mount_ntfs
+    init_system
+    fix_trustdb
+    config_mirrors
+    mount_partitions
+    deploy_system
+    config_system
     
-    # ISO检查与下载
-    if [ ! -f "$ISO_PATH" ]; then
-        echo "未找到ISO文件，开始下载..."
-        umount "$NTFS_MOUNT"
-        if mount -t ntfs-3g -o rw "$NTFS_PARTITION" "$NTFS_MOUNT"; then
-            download_iso
-            umount "$NTFS_MOUNT"
-            mount_ntfs
-        else
-            echo "错误：无法以读写模式挂载NTFS"
-            exit 1
-        fi
-    fi
-    
-    # EXT4处理流程
-    mount_ext4
-    extract_system
-    configure_mirrors
-    initialize_keyring
-    configure_system
-    
-    echo "=== 安装完成 ==="
-    echo "系统信息:"
-    chroot "$MOUNT_DIR" cat /etc/os-release
-    echo -e "\n请输入 reboot 重启系统"
+    log "=== 安装完成 ==="
+    log "重启前请检查："
+    log "1. 查看引导配置: chroot ${MOUNT_DIR} grep -i 'linux' /boot/grub/grub.cfg"
+    log "2. 验证网络配置: chroot ${MOUNT_DIR} ip a"
+    log "3. 检查系统服务: chroot ${MOUNT_DIR} systemctl list-unit-files"
 }
 
-# 启动安装流程
 main
