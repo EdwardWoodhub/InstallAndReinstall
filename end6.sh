@@ -40,20 +40,33 @@ check_network() {
     echo "=== 网络连接检查 ==="
     local test_host="mirror.alpix.eu"
     
-    if ! ping -c 2 -W 3 $test_host &>/dev/null; then
-        echo "配置备用DNS..."
+    # 同步硬件时钟确保证书验证
+    hwclock --hctosys
+    
+    # DNS解析测试
+    if ! nslookup $test_host >/dev/null 2>&1; then
+        echo "DNS解析失败，配置备用DNS..."
         echo "nameserver 8.8.8.8" > /etc/resolv.conf
         echo "nameserver 1.1.1.1" >> /etc/resolv.conf
         
-        if ! ping -c 2 -W 3 $test_host &>/dev/null; then
-            echo "错误：无法连接到欧洲镜像"
-            echo "请检查："
-            echo "1. 防火墙设置"
-            echo "2. 网络电缆/无线连接"
-            echo "3. 代理配置"
+        if ! nslookup $test_host >/dev/null 2>&1; then
+            echo "错误：DNS解析失败，请检查："
+            echo "1. 防火墙设置是否允许DNS查询（UDP 53）"
+            echo "2. 是否处于需要认证的网络环境（如酒店WiFi）"
+            echo "3. 企业网络是否限制访问外部DNS"
             exit 1
         fi
     fi
+    
+    # HTTP连接测试
+    if ! curl -sI https://$test_host >/dev/null; then
+        echo "HTTP连接测试失败，请检查："
+        echo "1. 防火墙是否允许HTTPS（TCP 443）"
+        echo "2. 是否配置了代理（export http_proxy=...）"
+        echo "3. 系统时间是否准确（当前时间：$(date))"
+        exit 1
+    fi
+    
     echo "网络连接验证通过"
 }
 
@@ -62,7 +75,7 @@ check_dependencies() {
     local required=(
         "mount" "lsblk" "fsck" "ntfsfix" 
         "genfstab" "modprobe" "cp" "ping"
-        "curl" "gzip"
+        "curl" "gzip" "nslookup" "reflector"
     )
     local missing=()
     
@@ -112,7 +125,8 @@ download_iso() {
         if curl -L -k -C - -o "$tmp_dir/iso.tmp" "$ISO_URL" \
             --connect-timeout 30 \
             --retry 3 \
-            --retry-delay 10; then
+            --retry-delay 10 \
+            --retry-all-errors; then
             break
         else
             echo "下载失败，10秒后重试 ($i/3)..."
@@ -210,21 +224,21 @@ extract_system() {
 configure_mirrors() {
     echo "=== 配置欧洲镜像源 ==="
     cat > "$MOUNT_DIR/etc/pacman.d/mirrorlist" <<'EOL'
-## Germany
+## 德国（主镜像）
 Server = https://mirror.archlinux.de/archlinux/$repo/os/$arch
-Server = https://mirror.alpix.eu/archlinux/$repo/os/$arch
-## France
+## 法国（备用镜像1）
 Server = https://archlinux.mirrors.ovh.net/archlinux/$repo/os/$arch
-## Netherlands
+## 荷兰（备用镜像2）
 Server = https://ftp.nluug.nl/os/Linux/distr/archlinux/$repo/os/$arch
-## Sweden
+## 瑞典（备用镜像3）
 Server = https://ftp.acc.umu.se/mirror/archlinux/$repo/os/$arch
+## EndeavourOS官方镜像（IP直连）
+Server = https://94.16.105.229/endeavouros/repo/$repo/$arch
 EOL
 }
 
 initialize_keyring() {
     echo "=== 初始化密钥环 ==="
-    # 使用欧洲密钥服务器
     mkdir -p "$MOUNT_DIR/etc/pacman.d/gnupg"
     echo "keyserver hkp://keys.openpgp.org" > "$MOUNT_DIR/etc/pacman.d/gnupg/gpg.conf"
     
@@ -252,12 +266,16 @@ configure_system() {
     fi
     rm -f "$MOUNT_DIR/etc/.config_test"
 
-    # 生成fstab
+    # 复制DNS配置
     mkdir -p "$MOUNT_DIR/etc"
+    cp /etc/resolv.conf "$MOUNT_DIR/etc/resolv.conf"
+
+    # 生成fstab
     genfstab -U "$MOUNT_DIR" > "$MOUNT_DIR/etc/fstab"
     
     # 准备chroot环境
     mount --bind /dev "$MOUNT_DIR/dev"
+    mount -t devpts devpts "$MOUNT_DIR/dev/pts"
     mount --bind /proc "$MOUNT_DIR/proc"
     mount --bind /sys "$MOUNT_DIR/sys"
     
@@ -268,16 +286,43 @@ set -e
 export LC_ALL=C
 
 echo ">> 更新系统时间..."
-# 设置伦敦时区（自动处理夏令时）
 ln -sf /usr/share/zoneinfo/Europe/London /etc/localtime
-# 将系统时间写入硬件时钟（使用UTC存储）
 hwclock --systohc --utc
 
-echo ">> 更新软件数据库..."
-pacman -Syy --noconfirm
+echo ">> 更新软件数据库（带重试）..."
+for i in {1..5}; do
+    if pacman -Syy --disable-download-timeout; then
+        break
+    else
+        echo "数据库同步失败，10秒后重试 ($i/5)..."
+        sleep 10
+        reflector --country Germany --protocol https --latest 5 --save /etc/pacman.d/mirrorlist
+    fi
+done || {
+    echo "错误：无法同步数据库"
+    exit 1
+}
 
-echo ">> 安装基本系统..."
-pacman -S --noconfirm base linux linux-headers linux-firmware grub openssh sudo ntp
+echo ">> 安装基本系统（分组件重试）..."
+packages=(
+    base linux linux-headers linux-firmware 
+    grub openssh sudo ntp ca-certificates
+)
+
+for pkg in "${packages[@]}"; do
+    for i in {1..3}; do
+        if pacman -S --noconfirm --needed "$pkg"; then
+            break
+        else
+            echo "安装 $pkg 失败，更换镜像源 ($i/3)..."
+            reflector --country Germany --protocol https --latest 5 --sort rate --save /etc/pacman.d/mirrorlist
+            pacman -Syy
+        fi
+    done || {
+        echo "致命错误：无法安装 $pkg"
+        exit 1
+    }
+done
 
 echo ">> 配置本地化..."
 sed -i 's/#en_GB.UTF-8 UTF-8/en_GB.UTF-8 UTF-8/' /etc/locale.gen
@@ -301,16 +346,16 @@ grub-mkconfig -o /boot/grub/grub.cfg
 echo "生成的GRUB配置验证："
 grep -i 'linux\|initrd' /boot/grub/grub.cfg || { echo "GRUB配置错误！"; exit 1; }
 
-echo ">> 验证时区配置："
-echo "当前时区链接："
-ls -l /etc/localtime | grep -i Europe/London
-echo "系统时间："
-date
-echo "硬件时钟时间："
-hwclock --show
+echo ">> 网络时间协议配置..."
+systemctl enable systemd-timesyncd.service
 
-echo ">> 验证引导文件..."
-ls -l /boot/vmlinuz* /boot/initramfs* || { echo "内核文件缺失！"; exit 1; }
+echo ">> 最终验证："
+echo "1. 时区链接："
+ls -l /etc/localtime | grep Europe/London
+echo "2. 系统时间："
+timedatectl status
+echo "3. 镜像源状态："
+curl -I https://mirror.alpix.eu/endeavouros/repo/core.db
 EOF
 
     # 二次验证GRUB安装
@@ -357,10 +402,11 @@ main() {
     echo "=== 安装完成 ==="
     echo "系统信息:"
     chroot "$MOUNT_DIR" cat /etc/os-release
-    echo -e "\n首次启动后建议执行以下操作："
-    echo "1. 启用NTP服务: timedatectl set-ntp true"
-    echo "2. 确认时区设置: timedatectl set-timezone Europe/London"
-    echo "3. 重启系统: reboot"
+    echo -e "\n首次启动后操作建议："
+    echo "1. 检查时间同步：timedatectl status"
+    echo "2. 更新系统：pacman -Syu"
+    echo "3. 创建用户：useradd -m -G wheel 用户名"
+    echo "4. 重启系统：reboot"
 }
 
 # 启动安装流程
