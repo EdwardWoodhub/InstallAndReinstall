@@ -40,10 +40,8 @@ check_network() {
     echo "=== 网络连接检查 ==="
     local test_host="mirror.alpix.eu"
     
-    # 同步硬件时钟确保证书验证
     hwclock --hctosys
     
-    # DNS解析测试
     if ! nslookup $test_host >/dev/null 2>&1; then
         echo "DNS解析失败，配置备用DNS..."
         echo "nameserver 8.8.8.8" > /etc/resolv.conf
@@ -58,7 +56,6 @@ check_network() {
         fi
     fi
     
-    # HTTP连接测试
     if ! curl -sI https://$test_host >/dev/null; then
         echo "HTTP连接测试失败，请检查："
         echo "1. 防火墙是否允许HTTPS（TCP 443）"
@@ -75,7 +72,7 @@ check_dependencies() {
     local required=(
         "mount" "lsblk" "fsck" "ntfsfix" 
         "genfstab" "modprobe" "cp" "ping"
-        "curl" "gzip" "nslookup" "reflector"
+        "curl" "gzip" "nslookup"
     )
     local missing=()
     
@@ -104,11 +101,9 @@ mount_ntfs() {
     echo "=== 处理NTFS分区 ==="
     mkdir -p "$NTFS_MOUNT"
     
-    # 先执行ntfsfix修复
     echo "正在修复NTFS文件系统..."
     ntfsfix -d "$NTFS_PARTITION"
 
-    # 挂载分区
     if ! mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT"; then
         echo "错误：NTFS分区挂载失败"
         exit 1
@@ -120,7 +115,6 @@ download_iso() {
     local tmp_dir="/tmp/iso.download"
     mkdir -p "$tmp_dir"
     
-    # 带重试机制的下载
     for i in {1..3}; do
         if curl -L -k -C - -o "$tmp_dir/iso.tmp" "$ISO_URL" \
             --connect-timeout 30 \
@@ -137,7 +131,6 @@ download_iso() {
         exit 1
     }
     
-    # 移动文件
     mkdir -p "$(dirname "$ISO_PATH")"
     mv "$tmp_dir/iso.tmp" "$ISO_PATH"
     echo "ISO下载完成: $ISO_PATH"
@@ -147,13 +140,11 @@ mount_ext4() {
     echo "=== 处理EXT4分区 ==="
     mkdir -p "$MOUNT_DIR"
     
-    # 强制卸载可能存在的残留挂载
     umount "$MOUNT_DIR" 2>/dev/null || {
         echo "警告：存在残留挂载，尝试强制卸载..."
         umount -l "$MOUNT_DIR" || true
     }
 
-    # 深度文件系统修复
     echo "执行深度文件系统检查..."
     if ! fsck -y -f -C 0 "$EXT4_PARTITION"; then
         echo "错误：文件系统修复失败，尝试备份superblock..."
@@ -165,11 +156,9 @@ mount_ext4() {
         }
     fi
 
-    # 挂载分区（强制读写模式）
     echo "挂载分区..."
     for i in {1..3}; do
         if mount -o rw,nodelalloc,strictatime,data=ordered "$EXT4_PARTITION" "$MOUNT_DIR"; then
-            # 写入验证
             if touch "$MOUNT_DIR/.rw_test"; then
                 rm -f "$MOUNT_DIR/.rw_test"
                 echo "挂载验证成功"
@@ -193,30 +182,25 @@ extract_system() {
     local temp_squashfs="/mnt/squashfs_temp"
     mkdir -p "$temp_squashfs" "/mnt/iso"
 
-    # 挂载ISO
     if ! mount -o loop,ro "$ISO_PATH" "/mnt/iso"; then
         echo "错误：无法挂载ISO文件"
         exit 1
     fi
     
-    # 定位squashfs文件
     local sfs_path="/mnt/iso/arch/x86_64/airootfs.sfs"
     [ -f "$sfs_path" ] || {
         echo "错误：找不到airootfs.sfs"
         exit 1
     }
 
-    # 挂载squashfs到临时目录
     if ! mount -t squashfs -o ro "$sfs_path" "$temp_squashfs"; then
         echo "错误：无法挂载squashfs文件"
         exit 1
     fi
 
-    # 复制文件到系统目录（保持权限）
     echo "正在复制系统文件..."
     cp -a "$temp_squashfs/"* "$MOUNT_DIR/"
 
-    # 清理临时挂载
     umount "$temp_squashfs"
     umount "/mnt/iso"
 }
@@ -230,8 +214,6 @@ Server = https://mirror.archlinux.de/archlinux/$repo/os/$arch
 Server = https://archlinux.mirrors.ovh.net/archlinux/$repo/os/$arch
 ## 荷兰（备用镜像2）
 Server = https://ftp.nluug.nl/os/Linux/distr/archlinux/$repo/os/$arch
-## 瑞典（备用镜像3）
-Server = https://ftp.acc.umu.se/mirror/archlinux/$repo/os/$arch
 ## EndeavourOS官方镜像（IP直连）
 Server = https://94.16.105.229/endeavouros/repo/$repo/$arch
 EOL
@@ -245,9 +227,7 @@ initialize_keyring() {
     chroot "$MOUNT_DIR" /bin/bash <<'EOF'
 #!/bin/bash
 set -e
-# 清理旧密钥环
 rm -rf /etc/pacman.d/gnupg/*
-# 初始化密钥环
 pacman-key --init
 pacman-key --populate archlinux
 EOF
@@ -255,31 +235,24 @@ EOF
 
 configure_system() {
     echo "=== 系统配置 ==="
-    # 二次挂载验证
     if ! touch "$MOUNT_DIR/etc/.config_test"; then
         echo "致命错误：文件系统仍为只读状态"
-        echo "当前挂载信息："
         mount | grep "$MOUNT_DIR"
-        echo "设备信息："
         lsblk -o NAME,MOUNTPOINT,FSTYPE,STATE,RO "$EXT4_PARTITION"
         exit 1
     fi
     rm -f "$MOUNT_DIR/etc/.config_test"
 
-    # 复制DNS配置
     mkdir -p "$MOUNT_DIR/etc"
     cp /etc/resolv.conf "$MOUNT_DIR/etc/resolv.conf"
 
-    # 生成fstab
     genfstab -U "$MOUNT_DIR" > "$MOUNT_DIR/etc/fstab"
     
-    # 准备chroot环境
     mount --bind /dev "$MOUNT_DIR/dev"
     mount -t devpts devpts "$MOUNT_DIR/dev/pts"
     mount --bind /proc "$MOUNT_DIR/proc"
     mount --bind /sys "$MOUNT_DIR/sys"
     
-    # 执行chroot配置
     chroot "$MOUNT_DIR" /bin/bash <<'EOF'
 #!/bin/bash
 set -e
@@ -290,13 +263,22 @@ ln -sf /usr/share/zoneinfo/Europe/London /etc/localtime
 hwclock --systohc --utc
 
 echo ">> 更新软件数据库（带重试）..."
+MIRRORS=(
+    "https://mirror.archlinux.de/archlinux/\$repo/os/\$arch"
+    "https://archlinux.mirrors.ovh.net/archlinux/\$repo/os/\$arch"
+    "https://ftp.nluug.nl/os/Linux/distr/archlinux/\$repo/os/\$arch"
+    "https://94.16.105.229/endeavouros/repo/\$repo/\$arch"
+)
+
 for i in {1..5}; do
     if pacman -Syy --disable-download-timeout; then
         break
     else
-        echo "数据库同步失败，10秒后重试 ($i/5)..."
-        sleep 10
-        reflector --country Germany --protocol https --latest 5 --save /etc/pacman.d/mirrorlist
+        echo "数据库同步失败，切换镜像源 ($i/5)..."
+        selected_mirror=${MIRRORS[$(( (i-1) % ${#MIRRORS[@]} ))]}
+        echo "使用镜像：$selected_mirror"
+        echo "Server = $selected_mirror" > /etc/pacman.d/mirrorlist
+        sleep 5
     fi
 done || {
     echo "错误：无法同步数据库"
@@ -315,7 +297,8 @@ for pkg in "${packages[@]}"; do
             break
         else
             echo "安装 $pkg 失败，更换镜像源 ($i/3)..."
-            reflector --country Germany --protocol https --latest 5 --sort rate --save /etc/pacman.d/mirrorlist
+            next_mirror=${MIRRORS[$(( (i-1) % ${#MIRRORS[@]} ))]}
+            echo "Server = $next_mirror" > /etc/pacman.d/mirrorlist
             pacman -Syy
         fi
     done || {
@@ -338,31 +321,26 @@ echo ">> 安装引导程序..."
 TARGET_DISK=$(lsblk -no pkname $(mount | grep ' / ' | awk '{print $1}'))
 echo "检测到目标磁盘：/dev/$TARGET_DISK"
 grub-install --target=i386-pc --recheck --debug "/dev/$TARGET_DISK"
-echo "GRUB模块验证："
 find /boot/grub -type f | grep normal.mod || { echo "GRUB模块缺失！"; exit 1; }
 
 echo ">> 生成GRUB配置..."
 grub-mkconfig -o /boot/grub/grub.cfg
-echo "生成的GRUB配置验证："
 grep -i 'linux\|initrd' /boot/grub/grub.cfg || { echo "GRUB配置错误！"; exit 1; }
 
 echo ">> 网络时间协议配置..."
 systemctl enable systemd-timesyncd.service
 
 echo ">> 最终验证："
-echo "1. 时区链接："
+echo "[时区验证]"
 ls -l /etc/localtime | grep Europe/London
-echo "2. 系统时间："
+echo "[时间状态]"
 timedatectl status
-echo "3. 镜像源状态："
+echo "[镜像连通性]"
 curl -I https://mirror.alpix.eu/endeavouros/repo/core.db
 EOF
 
-    # 二次验证GRUB安装
-    echo "=== 安装后验证 ==="
     if [ ! -f "$MOUNT_DIR/boot/grub/i386-pc/normal.mod" ]; then
         echo "致命错误：GRUB模块未正确安装！"
-        echo "调试信息："
         ls -lR "$MOUNT_DIR/boot"
         exit 1
     fi
@@ -375,10 +353,8 @@ main() {
     check_dependencies
     prepare_environment
     
-    # NTFS处理流程
     mount_ntfs
     
-    # ISO检查与下载
     if [ ! -f "$ISO_PATH" ]; then
         echo "未找到ISO文件，开始下载..."
         umount "$NTFS_MOUNT"
@@ -392,7 +368,6 @@ main() {
         fi
     fi
     
-    # EXT4处理流程
     mount_ext4
     extract_system
     configure_mirrors
@@ -406,7 +381,8 @@ main() {
     echo "1. 检查时间同步：timedatectl status"
     echo "2. 更新系统：pacman -Syu"
     echo "3. 创建用户：useradd -m -G wheel 用户名"
-    echo "4. 重启系统：reboot"
+    echo "4. 设置用户密码：passwd 用户名"
+    echo "5. 重启系统：reboot"
 }
 
 # 启动安装流程
