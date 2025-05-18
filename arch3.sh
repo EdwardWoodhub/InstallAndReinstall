@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # === 配置参数 ===
-ISO_PATH="/mnt/ntfs/endeavouros.iso"     # ISO 文件在 NTFS 分区中的路径
+ISO_PATH="/mnt/ntfs/iso/endeavouros.iso"     # ISO 文件在 NTFS 分区中的路径
 ROOT_PARTITION="/dev/sda1"               # ext4 分区（安装 EndeavourOS）
 NTFS_PARTITION="/dev/sda2"               # NTFS 分区（保留数据）
 MOUNT_POINT="/mnt/target"                # 目标系统挂载点
@@ -13,6 +13,7 @@ AIROOTFS_MOUNT="/mnt/airootfs"           # airootfs 挂载点
 
 # === 步骤 1: 挂载 NTFS 分区 ===
 echo "=== 挂载 NTFS 分区 ==="
+ntfsfix "$NTFS_PARTITION"
 mkdir -p /mnt/ntfs
 mount -t ntfs-3g "$NTFS_PARTITION" /mnt/ntfs
 
