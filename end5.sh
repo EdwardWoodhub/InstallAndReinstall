@@ -3,178 +3,163 @@ set -euo pipefail
 trap 'cleanup' EXIT
 
 # ================= 用户配置区域 =================
-NTFS_PARTITION="/dev/sda2"           # 使用 lsblk 确认NTFS分区
-EXT4_PARTITION="/dev/sda1"           # 使用 lsblk 确认EXT4分区
-MOUNT_DIR="/root/system"             # 系统挂载点
-NTFS_MOUNT="/root/ntfs"              # NTFS挂载点
-ISO_NAME="endeavouros.iso"           # ISO文件名
-ISO_PATH="$NTFS_MOUNT/iso/$ISO_NAME" # ISO完整路径
+NTFS_PARTITION="/dev/sda2"
+EXT4_PARTITION="/dev/sda1"
+MOUNT_DIR="/root/system"
+NTFS_MOUNT="/root/ntfs"
+ISO_NAME="endeavouros.iso"
+ISO_PATH="$NTFS_MOUNT/iso/$ISO_NAME"
 ISO_URL="https://mirror.alpix.eu/endeavouros/iso/EndeavourOS_Mercury-Neo-2025.03.19.iso"
-ARCH_KEY="DDB867B92AA789C165EEFA799B729B06A40C17EA"
-EOS_KEY="7D42C7F45FCFBFF7"
+ARCH_KEY="DDB867B92AA789C165EEFA799B729B06A40C17EA"  # Arch 主密钥
+EOS_KEY="7D42C7F45FCFBFF7"                          # EndeavourOS 主密钥
 # ================================================
 
-# ================= 全局函数 =================
+# ================= 全局配置 =================
+declare -A KEY_SERVERS=(
+    ["default"]="hkp://keyserver.ubuntu.com:80"
+    ["backup1"]="hkp://pgp.mit.edu:11371"
+    ["backup2"]="hkp://keys.gnupg.net:11371"
+    ["backup3"]="hkp://keyring.debian.org:11371"
+)
+KEY_FALLBACK_URL="https://keyserver.archlinux.org/pks/lookup?op=get&search="
+LOG_FILE="/var/log/install_$(date +%Y%m%d%H%M).log"
+
+# ================= 日志函数 =================
+log() {
+    echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+# ================= 清理函数 =================
 cleanup() {
-    echo "=== 执行清理操作 ==="
-    local mounts=(
-        "$MOUNT_DIR/dev/pts" 
-        "$MOUNT_DIR/dev" 
-        "$MOUNT_DIR/proc" 
-        "$MOUNT_DIR/sys" 
-        "$MOUNT_DIR" 
-        "$NTFS_MOUNT" 
-        "/mnt/iso"
-        "/mnt/squashfs_temp"
-    )
-    
-    for mountpoint in "${mounts[@]}"; do
-        if mountpoint -q "$mountpoint"; then
-            echo "卸载 $mountpoint"
-            umount -l "$mountpoint" 2>/dev/null || true
+    log "=== 清理环境..."
+    umount_partitions
+    rm -rf "/tmp/keys" 2>/dev/null
+}
+
+# ================= 辅助函数 =================
+umount_partitions() {
+    local mounts=("$MOUNT_DIR" "$NTFS_MOUNT" "/mnt/iso")
+    for mnt in "${mounts[@]}"; do
+        if mountpoint -q "$mnt"; then
+            umount -l "$mnt" 2>/dev/null && log "已卸载 $mnt"
         fi
     done
-    
-    rm -rf "/tmp/iso.download" "/mnt/squashfs_temp"
-    echo "清理完成"
 }
 
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-}
-
-retry_command() {
+retry() {
     local cmd=$1
     local max_retries=${2:-3}
     local delay=${3:-10}
-    local retries=0
+    local attempt=0
 
     while true; do
         if eval "$cmd"; then
             return 0
         else
-            ((retries++))
-            if [ $retries -ge $max_retries ]; then
+            ((attempt++))
+            if [ $attempt -ge $max_retries ]; then
+                log "命令失败: $cmd (尝试 $max_retries 次)"
                 return 1
             fi
-            log "操作失败，${delay}秒后重试 (${retries}/${max_retries})"
+            log "重试中 ($attempt/$max_retries)..."
             sleep $delay
         fi
     done
 }
 
-# ================= 核心功能 =================
+# ================= 密钥管理 =================
+import_key() {
+    local key_id=$1
+    local key_name=$2
+    local success=false
+
+    log "正在导入 $key_name 密钥 ($key_id)"
+
+    # 方案1: 尝试多个密钥服务器
+    for server in "${!KEY_SERVERS[@]}"; do
+        log "尝试从 ${KEY_SERVERS[$server]} 获取密钥"
+        if retry "pacman-key --keyserver '${KEY_SERVERS[$server]}' --recv-keys '$key_id'" 3 5; then
+            pacman-key --lsign-key "$key_id" && {
+                success=true
+                break
+            }
+        fi
+    done
+
+    # 方案2: 通过HTTP直接下载
+    if ! $success; then
+        log "尝试通过HTTP下载密钥..."
+        mkdir -p /tmp/keys
+        if curl -sL "${KEY_FALLBACK_URL}0x${key_id}" -o "/tmp/keys/${key_id}.asc"; then
+            pacman-key --add "/tmp/keys/${key_id}.asc" && \
+            pacman-key --lsign-key "$key_id" && success=true
+        fi
+    fi
+
+    # 方案3: 使用预置密钥环
+    if ! $success; then
+        log "使用预置密钥文件..."
+        if [ -f "/usr/share/pacman/keyrings/archlinux.gpg" ]; then
+            pacman-key --add /usr/share/pacman/keyrings/archlinux.gpg && \
+            pacman-key --lsign-key "$key_id" && success=true
+        fi
+    fi
+
+    $success || {
+        log "错误：无法导入 $key_name 密钥"
+        exit 1
+    }
+}
+
+# ================= 主流程 =================
 init_system() {
-    log "=== 初始化系统环境 ==="
-    
-    # 强制同步硬件时钟
-    log "同步硬件时钟..."
-    hwclock --hctosys --utc
-    
-    # 配置应急DNS
+    log "=== 初始化系统 ==="
+    timedatectl set-ntp true
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
     echo "nameserver 1.1.1.1" >> /etc/resolv.conf
-    
-    # 加载内核模块
-    for module in loop squashfs fuse; do
-        modprobe $module || log "警告：无法加载 $module 模块"
-    done
+    modprobe loop squashfs fuse
 }
 
-fix_trustdb() {
-    log "=== 修复信任数据库 ==="
+prepare_partitions() {
+    log "=== 准备分区 ==="
+    mkdir -p "$NTFS_MOUNT" "$MOUNT_DIR"
     
-    # 重置密钥环
-    rm -rf /etc/pacman.d/gnupg/*
-    pacman-key --init
+    # 处理NTFS分区
+    ntfsfix -d "$NTFS_PARTITION"
+    mount -t ntfs-3g -o ro "$NTFS_PARTITION" "$NTFS_MOUNT"
     
-    # 导入关键密钥
-    import_key() {
-        local key=$1
-        log "导入密钥 $key"
-        retry_command "pacman-key --recv-keys $key" 3 5
-        pacman-key --lsign-key $key
-    }
-    
-    import_key $ARCH_KEY
-    import_key $EOS_KEY
-    
-    # 更新密钥数据库
-    pacman-key --refresh-keys
-    pacman -Sy --noconfirm archlinux-keyring
-}
-
-config_mirrors() {
-    log "=== 配置镜像源 ==="
-    
-    # 安装reflector
-    if ! command -v reflector &>/dev/null; then
-        log "安装reflector..."
-        pacman -Sy --noconfirm reflector
-    fi
-    
-    # 生成优化镜像源
-    reflector \
-        --country France,Germany,Netherlands,Sweden \
-        --protocol https \
-        --latest 30 \
-        --sort rate \
-        --save /etc/pacman.d/mirrorlist
-    
-    # 添加EndeavourOS源
-    cat >> /etc/pacman.d/mirrorlist <<EOL
-## EndeavourOS 欧洲源
-Server = https://mirror.alpix.eu/endeavouros/repo/\$repo/\$arch
-EOL
-
-    # 验证镜像源
-    if ! curl -I https://mirror.archlinux.de &>/dev/null; then
-        log "错误：镜像源不可达"
-        exit 1
-    fi
-}
-
-mount_partitions() {
-    log "=== 处理存储分区 ==="
-    
-    # NTFS分区处理
-    mkdir -p $NTFS_MOUNT
-    ntfsfix -d $NTFS_PARTITION
-    mount -t ntfs-3g -o ro $NTFS_PARTITION $NTFS_MOUNT
-    
-    # EXT4分区处理
-    mkdir -p $MOUNT_DIR
-    fsck -y -f $EXT4_PARTITION
-    mount -o rw,nodelalloc $EXT4_PARTITION $MOUNT_DIR
+    # 处理EXT4分区
+    fsck -y -f "$EXT4_PARTITION"
+    mount -o rw,nodelalloc "$EXT4_PARTITION" "$MOUNT_DIR"
 }
 
 deploy_system() {
-    log "=== 部署操作系统 ==="
-    
-    # 挂载ISO
+    log "=== 部署系统 ==="
     mkdir -p /mnt/iso
-    mount -o loop,ro $ISO_PATH /mnt/iso
-    
-    # 解压squashfs
-    mkdir -p /mnt/squashfs
+    mount -o loop,ro "$ISO_PATH" /mnt/iso
     mount -t squashfs /mnt/iso/arch/x86_64/airootfs.sfs /mnt/squashfs
-    cp -a /mnt/squashfs/* $MOUNT_DIR
+    
+    log "复制系统文件..."
+    rsync -aHAX --info=progress2 /mnt/squashfs/ "$MOUNT_DIR/"
     
     # 准备chroot环境
-    mount --bind /dev $MOUNT_DIR/dev
-    mount -t proc proc $MOUNT_DIR/proc
-    mount -t sysfs sys $MOUNT_DIR/sys
+    mount --bind /dev "$MOUNT_DIR/dev"
+    mount -t proc proc "$MOUNT_DIR/proc"
+    mount -t sysfs sys "$MOUNT_DIR/sys"
 }
 
 config_system() {
     log "=== 系统配置 ==="
+    genfstab -U "$MOUNT_DIR" > "$MOUNT_DIR/etc/fstab"
     
-    # 生成fstab
-    genfstab -U $MOUNT_DIR > $MOUNT_DIR/etc/fstab
-    
-    chroot $MOUNT_DIR /bin/bash <<EOL
-#!/bin/bash
+    chroot "$MOUNT_DIR" /bin/bash <<EOL
 set -e
+export LC_ALL=C
+
+# 密钥管理
+echo "Server = https://mirror.archlinux.de/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
+echo "Server = https://mirror.alpix.eu/endeavouros/repo/\$repo/\$arch" >> /etc/pacman.d/mirrorlist
+pacman -Sy --noconfirm archlinux-keyring endeavouros-keyring
 
 # 基础配置
 ln -sf /usr/share/zoneinfo/UTC /etc/localtime
@@ -183,12 +168,9 @@ sed -i 's/#en_US.UTF-8/en_US.UTF-8/' /etc/locale.gen
 locale-gen
 echo "LANG=en_US.UTF-8" > /etc/locale.conf
 
-# 内核安装
-pacman -Syy --noconfirm
-pacman -S --noconfirm linux linux-headers linux-firmware
-
 # 引导配置
-grub-install --target=i386-pc --recheck $(lsblk -no pkname $EXT4_PARTITION)
+pacman -S --noconfirm grub linux linux-headers
+grub-install --target=i386-pc --recheck $(lsblk -no pkname "$EXT4_PARTITION")
 grub-mkconfig -o /boot/grub/grub.cfg
 
 # 网络配置
@@ -197,22 +179,15 @@ echo "EndeavourOS" > /etc/hostname
 EOL
 }
 
-# ================= 主流程 =================
 main() {
-    [ $EUID -ne 0 ] && echo "必须使用root权限运行" && exit 1
-    
+    [ $EUID -ne 0 ] && { log "必须使用root权限运行"; exit 1; }
     init_system
-    fix_trustdb
-    config_mirrors
-    mount_partitions
+    import_key "$ARCH_KEY" "Arch Linux"
+    import_key "$EOS_KEY" "EndeavourOS"
+    prepare_partitions
     deploy_system
     config_system
-    
-    log "=== 安装完成 ==="
-    log "重启前请检查："
-    log "1. 查看引导配置: chroot ${MOUNT_DIR} grep -i 'linux' /boot/grub/grub.cfg"
-    log "2. 验证网络配置: chroot ${MOUNT_DIR} ip a"
-    log "3. 检查系统服务: chroot ${MOUNT_DIR} systemctl list-unit-files"
+    log "=== 安装成功！请重启系统 ==="
 }
 
 main
