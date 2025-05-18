@@ -73,9 +73,50 @@ check_dependencies() {
     done
     
     if [ ${#missing[@]} -gt 0 ]; then
-        echo "错误：缺少必要命令 - ${missing[*]}"
-        exit 1
+        echo "检测到缺失命令: ${missing[*]}"
+        
+        # 动态修复reflector缺失
+        if [[ " ${missing[*]} " == *"reflector"* ]]; then
+            echo ">>> 正在自动安装reflector..."
+            
+            # 配置临时镜像源
+            echo "Server = https://mirror.archlinux.de/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist
+            echo "Server = https://ftp.nluug.nl/os/Linux/distr/archlinux/\$repo/os/\$arch" >> /etc/pacman.d/mirrorlist
+            
+            # 修复密钥环
+            echo "初始化密钥环..."
+            pacman-key --init
+            pacman-key --populate archlinux
+            
+            # 强制更新数据库
+            echo "同步软件数据库..."
+            pacman -Sy --noconfirm archlinux-keyring
+            
+            # 安装reflector
+            if ! pacman -S --noconfirm reflector; then
+                echo ">>> 尝试备用安装方案..."
+                curl -LO https://geo.mirror.pkgbuild.com/extra/os/x86_64/reflector-2023-9-any.pkg.tar.zst
+                pacman -U --noconfirm reflector-*.pkg.tar.zst
+                rm -f reflector-*.pkg.tar.zst
+            fi
+            
+            # 二次验证
+            if command -v reflector &>/dev/null; then
+                echo "reflector 安装成功"
+                missing=("${missing[@]/reflector}")
+            else
+                echo "错误：无法自动安装reflector"
+                exit 1
+            fi
+        fi
+        
+        # 检查剩余缺失项
+        if [ ${#missing[@]} -gt 0 ]; then
+            echo "错误：仍需手动安装 - ${missing[*]}"
+            exit 1
+        fi
     fi
+    echo "所有依赖项已满足"
 }
 
 prepare_environment() {
@@ -208,12 +249,12 @@ extract_system() {
 }
 
 configure_mirrors() {
-    echo "=== 动态生成欧洲镜像源 ==="
+    echo "=== 生成优化镜像源 ==="
     reflector \
         --verbose \
         --country France,Germany,Netherlands,Sweden \
         --protocol https \
-        --latest 5 \
+        --latest 30 \
         --sort rate \
         --save "$MOUNT_DIR/etc/pacman.d/mirrorlist"
     
