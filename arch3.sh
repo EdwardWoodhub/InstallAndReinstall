@@ -62,6 +62,11 @@ rsync -a "$AIROOTFS_MOUNT/" "$MOUNT_POINT/"
 
 # === 步骤 8: 挂载必要设备 ===
 echo "=== 挂载必要设备 ==="
+mkdir -p "$MOUNT_POINT/dev"
+mkdir -p "$MOUNT_POINT/dev/pts"
+mkdir -p "$MOUNT_POINT/proc"
+mkdir -p "$MOUNT_POINT/sys"
+mkdir -p "$MOUNT_POINT/run"
 mount --bind /dev "$MOUNT_POINT/dev"
 mount --bind /dev/pts "$MOUNT_POINT/dev/pts"
 mount --bind /proc "$MOUNT_POINT/proc"
