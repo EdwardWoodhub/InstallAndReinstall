@@ -103,8 +103,8 @@ systemctl enable NetworkManager
 echo 'root:ant2025root' | chpasswd
 
 # 创建 ant 用户并设置密码
-useradd -m -g users -G wheel -s /bin/bash ant
-echo 'ant:ant2025root' | chpasswd
+#useradd -m -g users -G wheel -s /bin/bash ant
+#echo 'ant:ant2025root' | chpasswd
 
 EOF
 
