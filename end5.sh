@@ -10,8 +10,8 @@ NTFS_MOUNT="/root/ntfs"
 ISO_NAME="endeavouros.iso"
 ISO_PATH="$NTFS_MOUNT/iso/$ISO_NAME"
 ISO_URL="https://mirror.alpix.eu/endeavouros/iso/EndeavourOS_Mercury-Neo-2025.03.19.iso"
-ARCH_KEY="DDB867B92AA789C165EEFA799B729B06A40C17EA"  # Arch 主密钥
-EOS_KEY="7D42C7F45FCFBFF7"                          # EndeavourOS 主密钥
+ARCH_KEY="91FFE0700E80619CEB73235CA88E23E377514E00"  # Arch 主密钥
+EOS_KEY="8F43FC374CD4CEEA19CEE323E3D8752ACDF595A1"                          # EndeavourOS 主密钥
 # ================================================
 
 # ================= 全局配置 =================
