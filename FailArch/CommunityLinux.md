@@ -1,5 +1,0 @@
-# CommunityLinux
-
-# ArchLinux
-
-ArchLinux
