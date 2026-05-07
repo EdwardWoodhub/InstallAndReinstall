@@ -5,8 +5,14 @@ Kali
 
 
 # Ubuntu
-PopOS
+PopOS;
+TUXEDO OS;
 
-# Redhat
-Redhat
+# Fedora & Redhat
+Fedora;
+Redhat;
 Almalinux
+
+
+# openSUSE
+openSUSE
