@@ -6,7 +6,8 @@ Kali
 
 # Ubuntu
 PopOS;
-TUXEDO OS;
+TUXEDO OS
+
 
 # Fedora & Redhat
 Fedora;
@@ -16,3 +17,8 @@ Almalinux
 
 # openSUSE
 openSUSE
+
+
+# Independent
+Unraid (有Slackware的血统)
+
